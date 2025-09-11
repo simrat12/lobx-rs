@@ -29,21 +29,15 @@ pub struct Fill {
     pub ts: u64
 }
 
-pub struct Ack {
-    pub id: u64,
-    pub ts: u64
-}
-
-pub enum DoneReason {
-    FILLED,
-    RESTED,
-    CANCELLED,
-    REJECTED
-}
+pub enum DoneReason { Filled, Rested, Cancelled, Rejected }
 
 pub enum Event {
-    Ack,
-    Fill,
-    DoneReason
+    Ack  { id: u64, ts: u64 },
+    Fill { taker_id: u64, maker_id: u64, price: i64, qty: i64, ts: u64 },
+    Done { id: u64, reason: DoneReason, ts: u64 },
+}
+
+pub struct SubmitResult {
+    pub events: Vec<Event>
 }
 
