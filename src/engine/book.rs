@@ -33,21 +33,19 @@ impl Book {
 
     pub fn best_bid(&self) -> Option<(i64, u64)> {
         // Look up the highest price level on the bid side, and sum up all of the associated order quantities
-        if let Some((i, y)) = &self.bids.last_key_value() {
-            let best_price = *i;
+        for (price, level) in self.bids.iter().rev() {
+            if *price == 0 { continue; } // Skip dummy level
             let mut counter = 0;
-            for x in &y.queue {
+            for x in &level.queue {
                 if x.active && x.remaining > 0 {
                     counter += x.remaining
                 }
             }
-
-            return Some((*best_price, counter.try_into().unwrap()))
+            if counter > 0 {
+                return Some((*price, counter.try_into().unwrap()))
+            }
         }
-
-        else {
-            None
-        }
+        None
     }
 
     pub fn best_ask(&self) -> Option<(i64, u64)> {
