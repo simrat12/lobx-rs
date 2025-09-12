@@ -8,7 +8,7 @@ pub enum Side {
 pub struct Order {
     pub id: u64,
     pub price: Option<i64>,
-    pub quantity: i64,
+    pub quantity: u64,
     pub side: Side
 }
 
@@ -17,9 +17,9 @@ pub struct Order {
 pub struct Resting {
     pub id: u64,
     pub price: Option<i64>,
-    pub quantity: i64,
+    pub quantity: u64,
     pub ts: u64,
-    pub remaining: i64,
+    pub remaining: u64,
     pub active: bool
 }
 
@@ -29,7 +29,7 @@ pub struct Fill {
     pub taker_id: u64,
     pub maker_id: u64,
     pub price: Option<i64>,
-    pub quantity: i64,
+    pub quantity: u64,
     pub ts: u64
 }
 
@@ -39,7 +39,7 @@ pub enum DoneReason { Filled, Rested, Cancelled, Rejected }
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     Ack  { id: u64, ts: u64 },
-    Fill { taker_id: u64, maker_id: u64, price: i64, qty: i64, ts: u64 },
+    Fill { taker_id: u64, maker_id: u64, price: i64, qty: u64, ts: u64 },
     Done { id: u64, reason: DoneReason, ts: u64 },
 }
 

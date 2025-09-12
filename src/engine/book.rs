@@ -176,15 +176,31 @@ mod tests {
 
     #[test]
     fn test_initialise() {
-        let _book = Book::new();
-        // Optionally, add assertions here to test initialization
+        let book = Book::new();
+        // Test that the book is initialized with dummy levels
+        assert_eq!(book.bids.len(), 1);
+        assert_eq!(book.asks.len(), 1);
+        assert!(book.bids.contains_key(&0));
+        assert!(book.asks.contains_key(&0));
+        assert_eq!(book.id_index.len(), 0);
+        
+        // Test that dummy levels have empty queues
+        assert_eq!(book.bids.get(&0).unwrap().queue.len(), 0);
+        assert_eq!(book.asks.get(&0).unwrap().queue.len(), 0);
     }
 
     #[test]
     fn test_best_bid() {
         let book = Book::new();
-        let best_bid = book.best_bid().unwrap().0;
-        assert_eq!(best_bid, 0);
+        // With only dummy levels, best_bid should return None
+        assert_eq!(book.best_bid(), None);
+        
+        // Add a real bid and test
+        let mut book_with_bid = Book::new();
+        let order = Order { id: 1, side: Side::BUY, price: Some(100), quantity: 10 };
+        book_with_bid.submit(order);
+        let best_bid = book_with_bid.best_bid().unwrap().0;
+        assert_eq!(best_bid, 100);
     }
 
     #[test]
