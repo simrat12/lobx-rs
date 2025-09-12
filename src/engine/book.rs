@@ -5,6 +5,7 @@ use crate::engine::types::DoneReason;
 use crate::engine::types::Order;
 use crate::engine::types::SubmitResult;
 use crate::engine::types::{Resting, Side, Event};
+use crate::engine::book::Side::BUY;
 use std::time::Instant;
 
 struct Level {
@@ -78,6 +79,25 @@ impl Book {
         if o.quantity <= 0 {
             SubmitResult {
                 events: vec![Event::Done {id: o.id, reason: DoneReason::Rejected, ts}]
+            }
+        }
+
+        else if o.price.is_none() {
+            if o.side == BUY {
+                // Look up the price level
+                // iterate through order book asks until 'remaining' = 0 
+                let bid_price = o.price.unwrap();
+                let order_qts = &mut self.asks.get_mut(&bid_price).unwrap();
+                let counter = &o.quantity;
+                for x in &mut order_qts.queue {
+                    if x.active && x.remaining > 0 && *counter >= x.remaining {
+                        x.remaining -= *counter
+                    }
+                }
+            }
+
+            SubmitResult {
+                events: vec![Event::Done {id: o.id, reason: DoneReason::Filled, ts}]
             }
         }
 
