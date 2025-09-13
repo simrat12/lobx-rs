@@ -16,10 +16,10 @@ struct Level {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Book {
-    bids: BTreeMap<i64, Level>,
-    asks: BTreeMap<i64, Level>,
-    id_index: HashMap<u64, (Side, i64)>
+pub struct Book {
+    pub bids: BTreeMap<i64, Level>,
+    pub asks: BTreeMap<i64, Level>,
+    pub id_index: HashMap<u64, (Side, i64)>
 }
 
 impl Book {
@@ -240,6 +240,15 @@ mod tests {
 
         assert_eq!(book.asks, fake_asks);
 
+    }
+
+    #[test]
+    fn test_market_order_no_liquidity() {
+        let mut book = Book::new();
+        // Submit a BUY market order when there are no asks (no liquidity)
+        let market_order = Order {id: 1, side: Side::BUY, price: None, quantity: 10};
+        
+        book.submit(market_order);
     }
 }
 
