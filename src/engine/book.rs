@@ -87,6 +87,8 @@ impl Book {
 
         else if o.price.is_none() {
             // MARKET ORDERS
+            let mut events = vec![];
+            
             if o.side == BUY {
                 // MARKET ORDER - BID
                 // Get the best ask price
@@ -99,6 +101,9 @@ impl Book {
                         let fill_qty = std::cmp::min(counter, x.remaining);
                         x.remaining -= fill_qty;
                         counter -= fill_qty;
+                        
+                        events.push(Event::Fill {taker_id: o.id, maker_id: x.id, price: best_ask, qty: fill_qty, ts});
+                        
                         if counter <= 0 { break; }
                     }
                 }
@@ -114,14 +119,16 @@ impl Book {
                         let fill_qty = std::cmp::min(counter, x.remaining);
                         x.remaining -= fill_qty;
                         counter -= fill_qty;
+                        
+                        events.push(Event::Fill {taker_id: o.id, maker_id: x.id, price: best_bid, qty: fill_qty, ts});
+                        
                         if counter <= 0 { break; }
                     }
                 }
             }
 
-            SubmitResult {
-                events: vec![Event::Done {id: o.id, reason: DoneReason::Filled, ts}]
-            }
+            events.push(Event::Done {id: o.id, reason: DoneReason::Filled, ts});
+            SubmitResult { events }
         }
 
         else {
