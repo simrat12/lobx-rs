@@ -134,6 +134,7 @@ impl Book {
         else {
             
             if o.side == BUY {
+                // LIMIT ORDER - BID
                 let bid_price = o.price.unwrap();
                 let mut queue = VecDeque::new();
                 queue.push_back(Resting {
@@ -152,6 +153,7 @@ impl Book {
             }
 
             else {
+                // LIMIT ORDER - ASK
                 let ask_price = o.price.unwrap();
                 let mut queue = VecDeque::new();
                 queue.push_back(Resting {
@@ -247,6 +249,20 @@ mod tests {
 
         assert_eq!(book.asks, fake_asks);
 
+    }
+
+    #[test]
+    fn test_market_order_fill_events() {
+        let now = Instant::now();
+        let ts = now.elapsed().as_secs(); 
+        let mut book = Book::new();
+        let order1 = Order {id: 1, side: Side::SELL, price: Some(10), quantity: 100 };
+        book.submit(order1);
+        let order2 = Order {id: 2, side: Side::BUY, price: None, quantity: 10};
+        let result = book.submit(order2);
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0], Event::Fill {taker_id: 2, maker_id: 1, price: 10, qty: 10, ts});
+        assert_eq!(result.events[1], Event::Done {id: 2, reason: DoneReason::Filled, ts});
     }
 
     #[test]
