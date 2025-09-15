@@ -87,15 +87,64 @@ impl Book {
 
         else if o.price.is_none() {
             // MARKET ORDERS
-            let mut events = vec![];
-            
-            if o.side == BUY {
+            self.execute_market_order(o, ts)
+        }
+
+        else {
+            // LIMIT ORDERS
+            self.execute_limit_order(o, ts)
+        }
+
+    }
+
+    pub fn execute_limit_order(&mut self, o: Order, ts: u64) -> SubmitResult {
+        let bid_price = o.price.unwrap();
+        let mut queue = VecDeque::new();
+        match o.side {
+            Side::BUY => {
+                queue.push_back(Resting {
+                id: o.id,
+                price: o.price, 
+                remaining: o.quantity,
+                ts,
+                active: true,
+                quantity: o.quantity, 
+            });
+            self.bids.insert(bid_price, Level { price: bid_price, queue });
+
+            SubmitResult {
+                events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
+            }
+
+            }
+            Side::SELL => {
+                queue.push_back(Resting {
+                    id: o.id,
+                    price: o.price, 
+                    remaining: o.quantity,
+                    ts,
+                    active: true,
+                    quantity: o.quantity, 
+                });
+                self.asks.insert(bid_price, Level { price: bid_price, queue });
+
+                SubmitResult {
+                    events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
+                }
+            }
+        }
+    }
+
+    pub fn execute_market_order(&mut self, o: Order, ts: u64) -> SubmitResult {
+        let mut events = vec![];
+        match o.side { 
+            Side::BUY => {
                 // MARKET ORDER - BID
                 // Get the best ask price
-                // iterate through order book asks until 'remaining' = 0 
                 let best_ask = self.best_ask().unwrap().0;
                 let order_qts = &mut self.asks.get_mut(&best_ask).unwrap();
                 let mut counter = o.quantity;
+                // iterate through order book asks until 'remaining' = 0 
                 for x in &mut order_qts.queue {
                     if x.active && x.remaining > 0 {
                         let fill_qty = std::cmp::min(counter, x.remaining);
@@ -108,8 +157,7 @@ impl Book {
                     }
                 }
             }
-
-            else {
+            Side::SELL => {
                 // MARKET ORDER - ASK
                 let best_bid = self.best_bid().unwrap().0;
                 let order_qts = &mut self.bids.get_mut(&best_bid).unwrap();
@@ -126,52 +174,14 @@ impl Book {
                     }
                 }
             }
-
+        }
+        
+        // Add Done event if any fills occurred
+        if !events.is_empty() {
             events.push(Event::Done {id: o.id, reason: DoneReason::Filled, ts});
-            SubmitResult { events }
         }
-
-        else {
-            
-            if o.side == BUY {
-                // LIMIT ORDER - BID
-                let bid_price = o.price.unwrap();
-                let mut queue = VecDeque::new();
-                queue.push_back(Resting {
-                    id: o.id,
-                    price: o.price, 
-                    remaining: o.quantity,
-                    ts,
-                    active: true,
-                    quantity: o.quantity, 
-                });
-                self.bids.insert(bid_price, Level { price: bid_price, queue });
-
-                SubmitResult {
-                    events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
-                }
-            }
-
-            else {
-                // LIMIT ORDER - ASK
-                let ask_price = o.price.unwrap();
-                let mut queue = VecDeque::new();
-                queue.push_back(Resting {
-                    id: o.id,
-                    price: o.price, 
-                    remaining: o.quantity,
-                    ts,
-                    active: true,
-                    quantity: o.quantity, 
-                });
-                self.asks.insert(ask_price, Level { price: ask_price, queue });
-
-                SubmitResult {
-                    events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
-                }
-            }
-        }
-
+        
+        SubmitResult { events }
     }
 
 
