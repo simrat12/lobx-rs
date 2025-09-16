@@ -2,6 +2,7 @@ mod engine;
 use engine::book::Book;
 use engine::types::{Order, Side};
 use std::io::{self, Write};
+use tracing_subscriber::EnvFilter;
 
 fn print_top(book: &Book) {
     let bb = book.best_bid().map(|(p,q)| format!("BID=({p}, {q})")).unwrap_or("BID=None".into());
@@ -18,6 +19,13 @@ fn parse_side(s: &str) -> Option<Side> {
 }
 
 fn main() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("lobx_rs=info")); 
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .compact()
+        .init();
+
     let mut book = Book::new();
     let mut next_id: u64 = 1;
 

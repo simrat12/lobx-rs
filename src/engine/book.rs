@@ -8,6 +8,7 @@ use crate::engine::types::SubmitResult;
 use crate::engine::types::{Resting, Side, Event};
 use crate::engine::book::Side::BUY;
 use std::time::Instant;
+use tracing::{info, debug, warn, trace};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Level {
@@ -78,6 +79,7 @@ impl Book {
     pub fn submit(&mut self, o: Order) -> SubmitResult {
         let now = Instant::now();
         let ts = now.elapsed().as_secs(); 
+        debug!(id=o.id, ?o.side, price=?o.price, qty=o.quantity, "submit");
         // If quantity is 0, reject the order
         if o.quantity <= 0 {
             SubmitResult {
@@ -100,6 +102,7 @@ impl Book {
     pub fn execute_limit_order(&mut self, o: Order, ts: u64) -> SubmitResult {
         let bid_price = o.price.unwrap();
         let mut queue = VecDeque::new();
+        info!(side=?o.side, px=?o.price.unwrap(), qty=o.quantity, "rested_limit");
         match o.side {
             Side::BUY => {
                 queue.push_back(Resting {
