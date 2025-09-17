@@ -2,13 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::collections::HashMap;
 
-use crate::engine::types::DoneReason;
-use crate::engine::types::Order;
-use crate::engine::types::SubmitResult;
-use crate::engine::types::{Resting, Side, Event};
-use crate::engine::book::Side::BUY;
+use crate::engine::types::{DoneReason, Order, SubmitResult, Resting, Side, Event, BookError};
 use std::time::Instant;
-use tracing::{info, debug, warn, trace};
+use tracing::{info, debug, warn, trace, error, instrument};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Level {
@@ -24,14 +20,17 @@ pub struct Book {
 }
 
 impl Book {
+    #[instrument]
     pub fn new() -> Self {
         // Initialising a new instance of the orderBook
         let mut new_book = Book { bids: BTreeMap::new(), asks: BTreeMap::new(), id_index: HashMap::new() };
         new_book.bids.insert(0, Level{price: 0, queue: VecDeque::new()});
         new_book.asks.insert(0, Level{price: 0, queue: VecDeque::new()});
+        info!("Initialized new order book");
         new_book
     }
 
+    #[instrument(level = "trace")]
     pub fn best_bid(&self) -> Option<(i64, u64)> {
         // Look up the highest price level on the bid side, and sum up all of the associated order quantities
         for (price, level) in self.bids.iter().rev() {
@@ -43,12 +42,19 @@ impl Book {
                 }
             }
             if counter > 0 {
-                return Some((*price, counter.try_into().unwrap()))
+                let result = (*price, counter.try_into().unwrap_or_else(|e| {
+                    error!(counter = counter, error = %e, "Failed to convert counter to u64");
+                    0
+                }));
+                trace!(price = result.0, quantity = result.1, "Found best bid");
+                return Some(result);
             }
         }
+        trace!("No best bid found");
         None
     }
 
+    #[instrument(level = "trace")]
     pub fn best_ask(&self) -> Option<(i64, u64)> {
         // Look up the smallest value on the ask side, and sum up all the associatd quantities
         for (price, level) in &self.asks {
@@ -60,131 +66,221 @@ impl Book {
                 }
             }
             if counter > 0 {
-                return Some((*price, counter.try_into().unwrap()))
+                let result = (*price, counter.try_into().unwrap_or_else(|e| {
+                    error!(counter = counter, error = %e, "Failed to convert counter to u64");
+                    0
+                }));
+                trace!(price = result.0, quantity = result.1, "Found best ask");
+                return Some(result);
             }
         }
+        trace!("No best ask found");
         None
     }
 
+    #[instrument(level = "trace")]
     pub fn spread(&self) -> Option<i64> {
         // The difference between the best bid and the best ask
-
-        let best_bid = &self.best_bid().unwrap().0;
-        let best_ask = &self.best_ask().unwrap().0;
-        let spread = best_bid - best_ask;
+        let best_bid = match self.best_bid() {
+            Some((price, _)) => price,
+            None => {
+                trace!("No best bid available for spread calculation");
+                return None;
+            }
+        };
         
-        return Some(spread)
+        let best_ask = match self.best_ask() {
+            Some((price, _)) => price,
+            None => {
+                trace!("No best ask available for spread calculation");
+                return None;
+            }
+        };
+        
+        let spread = best_ask - best_bid; // Fixed: ask - bid, not bid - ask
+        trace!(best_bid = best_bid, best_ask = best_ask, spread = spread, "Calculated spread");
+        Some(spread)
     }
 
+    #[instrument(fields(order_id = o.id))]
     pub fn submit(&mut self, o: Order) -> SubmitResult {
+        let start_time = Instant::now();
         let now = Instant::now();
         let ts = now.elapsed().as_secs(); 
-        debug!(id=o.id, ?o.side, price=?o.price, qty=o.quantity, "submit");
-        // If quantity is 0, reject the order
-        if o.quantity <= 0 {
+        
+        // Store order ID for logging after the order is moved
+        let order_id = o.id;
+        
+        debug!(id=order_id, ?o.side, price=?o.price, qty=o.quantity, "Processing order submission");
+        
+        let result = if o.quantity == 0 {
+            let error = BookError::InvalidQuantity { quantity: o.quantity };
+            warn!(id=order_id, qty=o.quantity, error=%error, "Rejecting order with invalid quantity");
             SubmitResult {
-                events: vec![Event::Done {id: o.id, reason: DoneReason::Rejected, ts}]
+                events: vec![Event::Done {id: order_id, reason: DoneReason::Rejected, ts}]
             }
-        }
-
-        else if o.price.is_none() {
+        } else if o.price.is_none() {
             // MARKET ORDERS
+            debug!(id=order_id, "Processing market order");
             self.execute_market_order(o, ts)
-        }
-
-        else {
+        } else {
             // LIMIT ORDERS
+            debug!(id=order_id, price=?o.price, "Processing limit order");
             self.execute_limit_order(o, ts)
-        }
-
+        };
+        
+        let processing_time = start_time.elapsed();
+        debug!(
+            id=order_id, 
+            processing_time_ns = processing_time.as_nanos(),
+            events_count = result.events.len(),
+            "Order processing completed"
+        );
+        
+        result
     }
 
+    #[instrument(fields(order_id = o.id))]
     pub fn execute_limit_order(&mut self, o: Order, ts: u64) -> SubmitResult {
-        let bid_price = o.price.unwrap();
-        let mut queue = VecDeque::new();
-        info!(side=?o.side, px=?o.price.unwrap(), qty=o.quantity, "rested_limit");
-        match o.side {
-            Side::BUY => {
-                queue.push_back(Resting {
-                id: o.id,
-                price: o.price, 
-                remaining: o.quantity,
-                ts,
-                active: true,
-                quantity: o.quantity, 
-            });
-            self.bids.insert(bid_price, Level { price: bid_price, queue });
-
-            SubmitResult {
-                events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
+        let price = match o.price {
+            Some(p) => p,
+            None => {
+                error!(id=o.id, "Limit order missing price");
+                return SubmitResult {
+                    events: vec![Event::Done {id: o.id, reason: DoneReason::Rejected, ts}]
+                };
             }
+        };
+        
+        debug!(id=o.id, side=?o.side, price=price, qty=o.quantity, "Resting limit order");
+        self.add_resting_order(o, price, ts)
+    }
 
-            }
-            Side::SELL => {
-                queue.push_back(Resting {
-                    id: o.id,
-                    price: o.price, 
-                    remaining: o.quantity,
-                    ts,
-                    active: true,
-                    quantity: o.quantity, 
-                });
-                self.asks.insert(bid_price, Level { price: bid_price, queue });
+    fn add_resting_order(&mut self, o: Order, price: i64, ts: u64) -> SubmitResult {
+        let resting = Resting {
+            id: o.id,
+            price: o.price, 
+            remaining: o.quantity,
+            ts,
+            active: true,
+            quantity: o.quantity, 
+        };
 
-                SubmitResult {
-                    events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
-                }
-            }
+        let level_map = match o.side {
+            Side::BUY => &mut self.bids,
+            Side::SELL => &mut self.asks,
+        };
+
+        if let Some(existing_level) = level_map.get_mut(&price) {
+            existing_level.queue.push_back(resting);
+        } else {
+            let mut queue = VecDeque::new();
+            queue.push_back(resting);
+            level_map.insert(price, Level { price, queue });
+        }
+        
+        let order_id = o.id;
+        let side = o.side;
+        self.id_index.insert(order_id, (side, price));
+        debug!(id=order_id, price=price, side=?side, "Added order to book");
+
+        SubmitResult {
+            events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
         }
     }
 
+    #[instrument(fields(order_id = o.id))]
     pub fn execute_market_order(&mut self, o: Order, ts: u64) -> SubmitResult {
+        debug!(id=o.id, qty=o.quantity, side=?o.side, "Executing market order");
+        
         let mut events = vec![];
-        match o.side { 
-            Side::BUY => {
-                // MARKET ORDER - BID
-                // Get the best ask price
-                let best_ask = self.best_ask().unwrap().0;
-                let order_qts = &mut self.asks.get_mut(&best_ask).unwrap();
-                let mut counter = o.quantity;
-                // iterate through order book asks until 'remaining' = 0 
-                for x in &mut order_qts.queue {
-                    if x.active && x.remaining > 0 {
-                        let fill_qty = std::cmp::min(counter, x.remaining);
-                        x.remaining -= fill_qty;
-                        counter -= fill_qty;
-                        
-                        events.push(Event::Fill {taker_id: o.id, maker_id: x.id, price: best_ask, qty: fill_qty, ts});
-                        
-                        if counter <= 0 { break; }
-                    }
-                }
-            }
-            Side::SELL => {
-                // MARKET ORDER - ASK
-                let best_bid = self.best_bid().unwrap().0;
-                let order_qts = &mut self.bids.get_mut(&best_bid).unwrap();
-                let mut counter = o.quantity;
-                for x in &mut order_qts.queue {
-                    if x.active && x.remaining > 0 {
-                        let fill_qty = std::cmp::min(counter, x.remaining);
-                        x.remaining -= fill_qty;
-                        counter -= fill_qty;
-                        
-                        events.push(Event::Fill {taker_id: o.id, maker_id: x.id, price: best_bid, qty: fill_qty, ts});
-                        
-                        if counter <= 0 { break; }
-                    }
-                }
-            }
-        }
+        let remaining_qty = match o.side {
+            Side::BUY => self.execute_market_buy(o.id, o.quantity, ts, &mut events),
+            Side::SELL => self.execute_market_sell(o.id, o.quantity, ts, &mut events),
+        };
         
-        // Add Done event if any fills occurred
-        if !events.is_empty() {
-            events.push(Event::Done {id: o.id, reason: DoneReason::Filled, ts});
-        }
-        
+        self.finalize_market_order(o.id, o.quantity, remaining_qty, ts, &mut events);
         SubmitResult { events }
+    }
+
+    fn execute_market_buy(&mut self, order_id: u64, quantity: u64, ts: u64, events: &mut Vec<Event>) -> u64 {
+        let best_ask_price = match self.best_ask() {
+            Some((price, _)) => price,
+            None => {
+                let error = BookError::NoLiquidity { side: Side::BUY };
+                warn!(id=order_id, error=%error, "No liquidity available for market BUY order");
+                return quantity; // Return all remaining quantity
+            }
+        };
+        
+        let level = match self.asks.get_mut(&best_ask_price) {
+            Some(level) => level,
+            None => {
+                error!(id=order_id, price=best_ask_price, "Best ask level not found");
+                return quantity; // Return all remaining quantity
+            }
+        };
+        
+        Self::fill_against_level(order_id, quantity, best_ask_price, level, ts, events)
+    }
+
+    fn execute_market_sell(&mut self, order_id: u64, quantity: u64, ts: u64, events: &mut Vec<Event>) -> u64 {
+        let best_bid_price = match self.best_bid() {
+            Some((price, _)) => price,
+            None => {
+                let error = BookError::NoLiquidity { side: Side::SELL };
+                warn!(id=order_id, error=%error, "No liquidity available for market SELL order");
+                return quantity; // Return all remaining quantity
+            }
+        };
+        
+        let level = match self.bids.get_mut(&best_bid_price) {
+            Some(level) => level,
+            None => {
+                error!(id=order_id, price=best_bid_price, "Best bid level not found");
+                return quantity; // Return all remaining quantity
+            }
+        };
+        
+        Self::fill_against_level(order_id, quantity, best_bid_price, level, ts, events)
+    }
+
+    fn fill_against_level(taker_id: u64, mut remaining_qty: u64, price: i64, level: &mut Level, ts: u64, events: &mut Vec<Event>) -> u64 {
+        for resting_order in &mut level.queue {
+            if resting_order.active && resting_order.remaining > 0 && remaining_qty > 0 {
+                let fill_qty = std::cmp::min(remaining_qty, resting_order.remaining);
+                resting_order.remaining -= fill_qty;
+                remaining_qty -= fill_qty;
+                
+                debug!(taker_id=taker_id, maker_id=resting_order.id, price=price, qty=fill_qty, "Fill executed");
+                
+                events.push(Event::Fill {
+                    taker_id, 
+                    maker_id: resting_order.id, 
+                    price, 
+                    qty: fill_qty, 
+                    ts
+                });
+                
+                if remaining_qty == 0 { break; }
+            }
+        }
+        remaining_qty
+    }
+
+    fn finalize_market_order(&self, order_id: u64, _original_qty: u64, remaining_qty: u64, ts: u64, events: &mut Vec<Event>) {
+        if !events.is_empty() {
+            if remaining_qty == 0 {
+                events.push(Event::Done {id: order_id, reason: DoneReason::Filled, ts});
+                debug!(id=order_id, "Market order fully filled");
+            } else {
+                events.push(Event::Done {id: order_id, reason: DoneReason::Rejected, ts});
+                warn!(id=order_id, remaining_qty=remaining_qty, "Market order partially filled - insufficient liquidity");
+            }
+        } else {
+            warn!(id=order_id, "Market order rejected - no fills executed");
+            events.push(Event::Done {id: order_id, reason: DoneReason::Rejected, ts});
+        }
     }
 
 

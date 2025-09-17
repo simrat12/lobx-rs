@@ -1,4 +1,4 @@
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Side {
     BUY,
     SELL
@@ -36,6 +36,31 @@ pub struct Fill {
 #[derive(Debug, PartialEq, Eq)]
 pub enum DoneReason { Filled, Rested, Cancelled, Rejected }
 
+// Error types for better error handling
+#[derive(thiserror::Error, Debug)]
+pub enum BookError {
+    #[error("Invalid order quantity: {quantity}")]
+    InvalidQuantity { quantity: u64 },
+    
+    #[error("Order {id} not found")]
+    OrderNotFound { id: u64 },
+    
+    #[error("No liquidity available for {side:?} market order")]
+    NoLiquidity { side: Side },
+    
+    #[error("Price level {price} not found for {side:?}")]
+    PriceLevelNotFound { price: i64, side: Side },
+    
+    #[error("Invalid price for limit order")]
+    InvalidPrice,
+    
+    #[error("Integer conversion error: {source}")]
+    ConversionError { 
+        #[from]
+        source: std::num::TryFromIntError 
+    },
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Event {
     Ack  { id: u64, ts: u64 },
@@ -47,4 +72,6 @@ pub enum Event {
 pub struct SubmitResult {
     pub events: Vec<Event>
 }
+
+pub type BookResult<T> = Result<T, BookError>;
 

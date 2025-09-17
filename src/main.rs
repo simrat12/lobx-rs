@@ -3,11 +3,13 @@ use engine::book::Book;
 use engine::types::{Order, Side};
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
+use anyhow::Result;
 
 fn print_top(book: &Book) {
     let bb = book.best_bid().map(|(p,q)| format!("BID=({p}, {q})")).unwrap_or("BID=None".into());
     let ba = book.best_ask().map(|(p,q)| format!("ASK=({p}, {q})")).unwrap_or("ASK=None".into());
-    println!("TOP: {bb}  {ba}");
+    let spread = book.spread().map(|s| format!("SPREAD={s}")).unwrap_or("SPREAD=None".into());
+    println!("TOP: {bb}  {ba}  {spread}");
 }
 
 fn parse_side(s: &str) -> Option<Side> {
@@ -18,7 +20,7 @@ fn parse_side(s: &str) -> Option<Side> {
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("lobx_rs=info")); 
     tracing_subscriber::fmt()
@@ -70,4 +72,6 @@ fn main() {
             _ => println!("unknown cmd"),
         }
     }
+    
+    Ok(())
 }
