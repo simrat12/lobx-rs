@@ -283,6 +283,69 @@ impl Book {
         }
     }
 
+    pub fn cancel_limit_order(&mut self, o: Order, ts: u64) -> Option<SubmitResult> {
+        // Look up order id in id_index hashmap
+        // Extract the tuple represeting the (Side, Price)
+        // Remove this entry from the Hashmap
+        // Match based on whether the Side is a BUY or SELL 
+        // Look up the price in BTreeMap to get to the Level Struct
+        // Look up the price inside the Level struct to get to the queue 
+        // Iterate through the VecDeque object until we find one where the corresponding resting.id matches the order id
+        // Remove the resting order from Level VecDeque
+        if let Some(&(side, price)) = self.id_index.get(&o.id) {
+            self.id_index.remove(&o.id);
+            match side {
+                Side::BUY => {
+                    if let Some(level) = self.bids.get_mut(&price) {
+                        let queue = &mut level.queue;
+                        let mut counter = 0;
+                        for order in queue.iter() {
+                            if order.id == o.id {
+                                queue.remove(counter);
+                                break;
+
+                            }
+
+                            counter += 1;
+                        }
+
+                        Some(SubmitResult {events: vec![Event::Done {id: o.id, reason: DoneReason::Cancelled, ts}]})
+                    }
+
+                    else {
+                        None
+                    }
+                }
+
+                Side::SELL => {
+                    if let Some(level) = self.asks.get_mut(&price) {
+                        let queue = &mut level.queue;
+                        let mut counter = 0;
+                        for order in queue.iter() {
+                            if order.id == o.id {
+                                queue.remove(counter);
+                                break;
+                            }
+
+                            counter += 1;
+                        }
+                        Some(SubmitResult {events: vec![Event::Done {id: o.id, reason: DoneReason::Cancelled, ts}]})
+
+                    }
+
+                    else {
+                        None
+                    }
+                }
+            }
+        }
+
+        else {
+            None
+        }
+
+    }
+
 
 }
 
