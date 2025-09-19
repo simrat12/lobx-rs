@@ -102,8 +102,8 @@ impl Book {
         Some(spread)
     }
 
-    #[instrument(fields(order_id = o.id))]
-    pub fn submit(&mut self, o: Order) -> SubmitResult {
+    #[instrument(skip(self, o), fields(order_id = o.id, side = ?o.side, price = ?o.price))]
+    pub fn submit(&mut self, o: &Order) -> SubmitResult {
         let start_time = Instant::now();
         let now = Instant::now();
         let ts = now.elapsed().as_secs(); 
@@ -140,8 +140,8 @@ impl Book {
         result
     }
 
-    #[instrument(fields(order_id = o.id))]
-    pub fn execute_limit_order(&mut self, o: Order, ts: u64) -> SubmitResult {
+    #[instrument(skip(self, o), fields(order_id = o.id, side = ?o.side, price = ?o.price))]
+    pub fn execute_limit_order(&mut self, o: &Order, ts: u64) -> SubmitResult {
         let price = match o.price {
             Some(p) => p,
             None => {
@@ -156,7 +156,7 @@ impl Book {
         self.add_resting_order(o, price, ts)
     }
 
-    fn add_resting_order(&mut self, o: Order, price: i64, ts: u64) -> SubmitResult {
+    fn add_resting_order(&mut self, o: &Order, price: i64, ts: u64) -> SubmitResult {
         let resting = Resting {
             id: o.id,
             price: o.price, 
@@ -189,8 +189,8 @@ impl Book {
         }
     }
 
-    #[instrument(fields(order_id = o.id))]
-    pub fn execute_market_order(&mut self, o: Order, ts: u64) -> SubmitResult {
+    #[instrument(skip(self, o), fields(order_id = o.id, side = ?o.side, price = ?o.price))]
+    pub fn execute_market_order(&mut self, o: &Order, ts: u64) -> SubmitResult {
         debug!(id=o.id, qty=o.quantity, side=?o.side, "Executing market order");
         
         let mut events = vec![];
@@ -284,6 +284,7 @@ impl Book {
     }
 
     pub fn cancel_limit_order(&mut self, o: Order, ts: u64) -> Option<SubmitResult> {
+        debug!(id=o.id, "Attempting to cancel limit order");
         // Look up order id in id_index hashmap
         // Extract the tuple represeting the (Side, Price)
         // Remove this entry from the Hashmap
@@ -293,6 +294,7 @@ impl Book {
         // Iterate through the VecDeque object until we find one where the corresponding resting.id matches the order id
         // Remove the resting order from Level VecDeque
         if let Some(&(side, price)) = self.id_index.get(&o.id) {
+            debug!(id=o.id, price=price, side=?side, "Cancelling limit order");
             self.id_index.remove(&o.id);
             match side {
                 Side::BUY => {
@@ -301,7 +303,9 @@ impl Book {
                         let mut counter = 0;
                         for order in queue.iter() {
                             if order.id == o.id {
+                                debug!(?queue, "Found limit order to cancel");
                                 queue.remove(counter);
+                                debug!(?queue, "Limit order cancelled");
                                 break;
 
                             }
@@ -354,6 +358,22 @@ impl Book {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+    use tracing_subscriber::EnvFilter;
+
+    static INIT: Once = Once::new();
+
+    fn init_tracing() {
+        INIT.call_once(|| {
+            let _ = tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| EnvFilter::new("lobx_rs=trace")),
+                )
+                .with_test_writer() // <- routes logs to test output
+                .try_init();
+        });
+    }
 
     #[test]
     fn test_initialise() {
@@ -379,7 +399,7 @@ mod tests {
         // Add a real bid and test
         let mut book_with_bid = Book::new();
         let order = Order { id: 1, side: Side::BUY, price: Some(100), quantity: 10 };
-        book_with_bid.submit(order);
+        book_with_bid.submit(&order);
         let best_bid = book_with_bid.best_bid().unwrap().0;
         assert_eq!(best_bid, 100);
     }
@@ -388,7 +408,7 @@ mod tests {
     fn test_submit_event() {
         let mut book = Book::new();
         let order = Order { id: 1, side: Side::BUY, price: Some(100), quantity: 10 };
-        let result = book.submit(order);
+        let result = book.submit(&order);
         assert_eq!(result.events.len(), 1);
         // if let Event::Ack { id, .. } = result.events[0] {
         //     assert_eq!(id, 1);
@@ -403,9 +423,9 @@ mod tests {
         let ts = now.elapsed().as_secs(); 
         let mut book = Book::new();
         let order1 = Order {id: 1, side: Side::SELL, price: Some(10), quantity: 100 };
-        book.submit(order1);
+        book.submit(&order1);
         let order2 = Order {id: 2, side: Side::BUY, price: None, quantity: 10};
-        book.submit(order2);
+        book.submit(&order2);
         let mut fake_asks = BTreeMap::new();
         let mut queue = VecDeque::new();
         queue.push_back(Resting {
@@ -424,14 +444,47 @@ mod tests {
     }
 
     #[test]
+    fn test_cancel_market_order() {
+        init_tracing();
+        let now = Instant::now();
+        let ts = now.elapsed().as_secs(); 
+        let mut book = Book::new();
+        let order1 = Order {id: 1, side: Side::BUY, price: Some(10), quantity: 100 };
+        book.submit(&order1);
+        let mut fake_bids = BTreeMap::new();
+        let mut queue = VecDeque::new();
+        queue.push_back(Resting {
+            id: 1,
+            price: Some(10), 
+            remaining: 100,
+            ts,
+            active: true,
+            quantity: 100, 
+        });
+        fake_bids.insert(0, Level{price: 0, queue: VecDeque::new()});
+        fake_bids.insert(10, Level{price: 10, queue});
+
+        assert_eq!(book.bids, fake_bids);
+
+        book.cancel_limit_order(order1.clone(), ts);
+
+        if let Some(level) = fake_bids.get_mut(&10) {
+            level.queue.retain(|r| r.id != order1.id); // remove just that order
+        }
+
+        assert_eq!(book.bids, fake_bids);
+
+    }
+
+    #[test]
     fn test_market_order_fill_events() {
         let now = Instant::now();
         let ts = now.elapsed().as_secs(); 
         let mut book = Book::new();
         let order1 = Order {id: 1, side: Side::SELL, price: Some(10), quantity: 100 };
-        book.submit(order1);
+        book.submit(&order1);
         let order2 = Order {id: 2, side: Side::BUY, price: None, quantity: 10};
-        let result = book.submit(order2);
+        let result = book.submit(&order2);
         assert_eq!(result.events.len(), 2);
         assert_eq!(result.events[0], Event::Fill {taker_id: 2, maker_id: 1, price: 10, qty: 10, ts});
         assert_eq!(result.events[1], Event::Done {id: 2, reason: DoneReason::Filled, ts});
@@ -443,7 +496,7 @@ mod tests {
         // Submit a BUY market order when there are no asks (no liquidity)
         let market_order = Order {id: 1, side: Side::BUY, price: None, quantity: 10};
         
-        book.submit(market_order);
+        book.submit(&market_order);
     }
 }
 

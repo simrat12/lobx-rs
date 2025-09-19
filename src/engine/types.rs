@@ -4,7 +4,7 @@ pub enum Side {
     SELL
 }
 // Order as submitted by client/strategy
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Order {
     pub id: u64,
     pub price: Option<i64>,

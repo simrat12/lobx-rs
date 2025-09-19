@@ -1,6 +1,7 @@
 mod engine;
 use engine::book::Book;
 use engine::types::{Order, Side};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
 use anyhow::Result;
@@ -30,12 +31,14 @@ fn main() -> Result<()> {
 
     let mut book = Book::new();
     let mut next_id: u64 = 1;
+    let mut order_history: HashMap<u64, Order> = HashMap::new();
 
     println!("LOBX demo. Commands:");
     println!("  limit BUY  <price> <qty>");
     println!("  limit SELL <price> <qty>");
     println!("  market BUY  <qty>");
     println!("  market SELL <qty>");
+    println!("  cancel <order_id>");
     println!("  top    (print best bid/ask)");
     println!("  quit");
     print_top(&book);
@@ -54,8 +57,9 @@ fn main() -> Result<()> {
                 if let (Some(side), Ok(px), Ok(q)) =
                     (parse_side(t[1]), t[2].parse::<i64>(), t[3].parse::<u64>()) {
                     let o = Order { id: next_id, side, price: Some(px), quantity: q };
+                    order_history.insert(next_id, o.clone());
                     next_id += 1;
-                    let res = book.submit(o);
+                    let res = book.submit(&o);
                     println!("events: {:?}", res.events);
                     print_top(&book);
                 } else { println!("usage: limit BUY|SELL <price> <qty>"); }
@@ -64,10 +68,28 @@ fn main() -> Result<()> {
                 if let (Some(side), Ok(q)) = (parse_side(t[1]), t[2].parse::<u64>()) {
                     let o = Order { id: next_id, side, price: None, quantity: q };
                     next_id += 1;
-                    let res = book.submit(o);
+                    let res = book.submit(&o);
                     println!("events: {:?}", res.events);
                     print_top(&book);
                 } else { println!("usage: market BUY|SELL <qty>"); }
+            }
+            "cancel" if t.len()==2 => {
+                if let Ok(order_id) = t[1].parse::<u64>() {
+                    if let Some(original_order) = order_history.get(&order_id).cloned() {
+                        let now = std::time::Instant::now();
+                        let ts = now.elapsed().as_secs();
+                        match book.cancel_limit_order(original_order, ts) {
+                            Some(result) => {
+                                println!("events: {:?}", result.events);
+                                order_history.remove(&order_id);
+                            }
+                            None => println!("Order {} not found or already cancelled", order_id)
+                        }
+                        print_top(&book);
+                    } else {
+                        println!("Order {} not found in history", order_id);
+                    }
+                } else { println!("usage: cancel <order_id>"); }
             }
             _ => println!("unknown cmd"),
         }
