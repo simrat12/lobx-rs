@@ -128,7 +128,7 @@ TOP: BID=None  ASK=(10, 90)
 ## 🔜 Next Steps
 
 - ✅ Emit Fill events for all matches (in progress)
-- ⏳ Implement cancel flow (Done::Cancelled)
+- ✅ Implement cancel flow (Done::Cancelled)
 - ⏳ Add multiple-level matching (walk the book until counter=0 or limit exceeded)
 - ⏳ Integrate latency measurement & benchmarks
 - ⏳ Add snapshot/restore for persistence
