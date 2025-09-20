@@ -1,6 +1,6 @@
 mod engine;
 use engine::book::Book;
-use engine::types::{Order, Side};
+use engine::types::{Order, OrderRequest, Side};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
@@ -30,7 +30,6 @@ fn main() -> Result<()> {
         .init();
 
     let mut book = Book::new();
-    let mut next_id: u64 = 1;
     let mut order_history: HashMap<u64, Order> = HashMap::new();
 
     println!("LOBX demo. Commands:");
@@ -56,20 +55,21 @@ fn main() -> Result<()> {
             "limit" if t.len()==4 => {
                 if let (Some(side), Ok(px), Ok(q)) =
                     (parse_side(t[1]), t[2].parse::<i64>(), t[3].parse::<u64>()) {
-                    let o = Order { id: next_id, side, price: Some(px), quantity: q };
-                    order_history.insert(next_id, o.clone());
-                    next_id += 1;
-                    let res = book.submit(&o);
-                    println!("events: {:?}", res.events);
+                    let req = OrderRequest { side, price: Some(px), quantity: q };
+                    let (order_id, res) = book.submit(&req);
+                    let o = Order { id: order_id, side, price: Some(px), quantity: q };
+                    order_history.insert(order_id, o);
+                    println!("Order ID: {}, events: {:?}", order_id, res.events);
                     print_top(&book);
                 } else { println!("usage: limit BUY|SELL <price> <qty>"); }
             }
             "market" if t.len()==3 => {
                 if let (Some(side), Ok(q)) = (parse_side(t[1]), t[2].parse::<u64>()) {
-                    let o = Order { id: next_id, side, price: None, quantity: q };
-                    next_id += 1;
-                    let res = book.submit(&o);
-                    println!("events: {:?}", res.events);
+                    let req = OrderRequest { side, price: None, quantity: q };
+                    let (order_id, res) = book.submit(&req);
+                    let o = Order { id: order_id, side, price: None, quantity: q };
+                    order_history.insert(order_id, o);
+                    println!("Order ID: {}, events: {:?}", order_id, res.events);
                     print_top(&book);
                 } else { println!("usage: market BUY|SELL <qty>"); }
             }

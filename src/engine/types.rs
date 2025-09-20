@@ -3,7 +3,15 @@ pub enum Side {
     BUY,
     SELL
 }
-// Order as submitted by client/strategy
+// Order request from client/strategy (no ID assigned yet)
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct OrderRequest {
+    pub price: Option<i64>,
+    pub quantity: u64,
+    pub side: Side
+}
+
+// Order with assigned ID (for internal use)
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Order {
     pub id: u64,
