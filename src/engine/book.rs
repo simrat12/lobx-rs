@@ -158,6 +158,58 @@ impl Book {
         };
         
         debug!(id=o.id, side=?o.side, price=price, qty=o.quantity, "Resting limit order");
+
+        // Match on whether it's a buy or sell limit order
+        // Initialise counter
+        // Look up the price level for the bid or ask side
+        // While the counter is less than order quantity and the counter is greater that the order quantity,
+        // iterate through each element in the VecDeque at that price level and remove the resting order from the queue
+        let mut events: Vec<Event> = vec![];
+        match o.side {
+            Side::BUY => {
+                let mut remaining_qty = o.quantity;
+                if let Some(queue) = self.asks.get_mut(&price) {
+                    for resting in queue.iter_mut() {
+                        if remaining_qty == 0 { break; }
+                        let fill_qty = std::cmp::min(remaining_qty, resting.remaining);
+                        resting.remaining -= fill_qty;
+                        remaining_qty -= fill_qty;
+                        events.push(Event::Fill {
+                            taker_id: o.id,
+                            maker_id: resting.id,
+                            price,
+                            qty: fill_qty,
+                            ts
+                        });
+                        debug!(taker_id=o.id, maker_id=resting.id, price=price, qty=fill_qty, "Fill executed");
+                    }
+
+                    return SubmitResult { events }
+                }
+            },
+            Side::SELL => {
+                let mut remaining_qty = o.quantity;
+                if let Some(queue) = self.bids.get_mut(&price) {
+                    for resting in queue.iter_mut() {
+                        if remaining_qty == 0 { break; }
+                        let fill_qty = std::cmp::min(remaining_qty, resting.remaining);
+                        resting.remaining -= fill_qty;
+                        remaining_qty -= fill_qty;
+                        events.push(Event::Fill {
+                            taker_id: o.id,
+                            maker_id: resting.id,
+                            price,
+                            qty: fill_qty,
+                            ts
+                        });
+                        debug!(taker_id=o.id, maker_id=resting.id, price=price, qty=fill_qty, "Fill executed");
+                    }
+
+                    return SubmitResult { events }
+                }
+            }
+        }
+
         self.add_resting_order(o, price, ts)
     }
 
