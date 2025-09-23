@@ -184,7 +184,6 @@ impl Book {
                         debug!(taker_id=o.id, maker_id=resting.id, price=price, qty=fill_qty, "Fill executed");
                     }
 
-                    return SubmitResult { events }
                 }
             },
             Side::SELL => {
@@ -205,12 +204,14 @@ impl Book {
                         debug!(taker_id=o.id, maker_id=resting.id, price=price, qty=fill_qty, "Fill executed");
                     }
 
-                    return SubmitResult { events }
                 }
             }
         }
 
-        self.add_resting_order(o, price, ts)
+        // Add the resting order and combine events
+        let resting_result = self.add_resting_order(o, price, ts);
+        events.extend(resting_result.events);
+        SubmitResult { events }
     }
 
     fn add_resting_order(&mut self, o: &Order, price: i64, ts: u64) -> SubmitResult {
@@ -523,6 +524,20 @@ mod tests {
 
         assert_eq!(book.bids, fake_bids);
 
+    }
+
+    #[test]
+    fn test_limit_order_matching() {
+        let now = Instant::now();
+        let ts = now.elapsed().as_secs(); 
+        let mut book = Book::new();
+        let req1 = OrderRequest {side: Side::SELL, price: Some(10), quantity: 100 };
+        let (maker_id, _) = book.submit(&req1);
+        let req2 = OrderRequest {side: Side::BUY, price: Some(10), quantity: 10};
+        let (taker_id, result) = book.submit(&req2);
+        assert_eq!(result.events.len(), 2);
+        assert_eq!(result.events[0], Event::Fill {taker_id, maker_id, price: 10, qty: 10, ts});
+        assert_eq!(result.events[1], Event::Done {id: taker_id, reason: DoneReason::Rested, ts});
     }
 
     #[test]
