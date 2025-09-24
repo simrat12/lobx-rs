@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 use tracing_subscriber::EnvFilter;
 use anyhow::Result;
+use lobx_rs::telemetry;
 
 fn print_top(book: &Book) {
     let bb = book.best_bid().map(|(p,q)| format!("BID=({p}, {q})")).unwrap_or("BID=None".into());
@@ -21,13 +22,9 @@ fn parse_side(s: &str) -> Option<Side> {
     }
 }
 
-fn main() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("lobx_rs=info")); 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .compact()
-        .init();
+fn main() -> anyhow::Result<()> {
+    telemetry::init_tracing("lobx_rs=info");
+    telemetry::init_metrics();
 
     let mut book = Book::new();
     let mut order_history: HashMap<u64, Order> = HashMap::new();

@@ -141,6 +141,11 @@ impl Book {
             events_count = result.events.len(),
             "Order processing completed"
         );
+
+        metrics::counter!("lobx_submit_total").increment(1);
+
+        // Record metrics
+        metrics::histogram!("lobx_submit_latency_ns").record(processing_time.as_nanos() as f64);
         
         (order_id, result)
     }
