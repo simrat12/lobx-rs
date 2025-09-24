@@ -152,6 +152,8 @@ impl Book {
 
     #[instrument(skip(self, o), fields(order_id = o.id, side = ?o.side, price = ?o.price))]
     pub fn execute_limit_order(&mut self, o: &Order, ts: u64) -> SubmitResult {
+        let start_time = Instant::now();
+        
         let price = match o.price {
             Some(p) => p,
             None => {
@@ -170,56 +172,89 @@ impl Book {
         // While the counter is less than order quantity and the counter is greater that the order quantity,
         // iterate through each element in the VecDeque at that price level and remove the resting order from the queue
         let mut events: Vec<Event> = vec![];
+        let mut remaining_qty = o.quantity;
+        
         match o.side {
             Side::BUY => {
-                let mut remaining_qty = o.quantity;
-                if let Some(queue) = self.asks.get_mut(&price) {
-                    for resting in queue.iter_mut() {
-                        if remaining_qty == 0 { break; }
-                        let fill_qty = std::cmp::min(remaining_qty, resting.remaining);
-                        resting.remaining -= fill_qty;
-                        remaining_qty -= fill_qty;
-                        events.push(Event::Fill {
-                            taker_id: o.id,
-                            maker_id: resting.id,
-                            price,
-                            qty: fill_qty,
-                            ts
-                        });
-                        debug!(taker_id=o.id, maker_id=resting.id, price=price, qty=fill_qty, "Fill executed");
+                // Walk the book from best ask upward until filled or price > limit
+                while remaining_qty > 0 {
+                    let best_ask_price = match self.best_ask() {
+                        Some((price, _)) => price,
+                        None => break, // No liquidity available
+                    };
+                    
+                    // Stop if best ask price is higher than our limit
+                    if best_ask_price > price {
+                        break;
                     }
-
+                    
+                    // Fill against this price level
+                    if let Some(queue) = self.asks.get_mut(&best_ask_price) {
+                        let filled_qty = Self::fill_against_level(o.id, remaining_qty, best_ask_price, queue, ts, &mut events);
+                        remaining_qty -= remaining_qty - filled_qty;
+                        
+                        // Remove empty price levels
+                        if queue.is_empty() || queue.iter().all(|r| !r.active || r.remaining == 0) {
+                            self.asks.remove(&best_ask_price);
+                        }
+                    } else {
+                        break; // Level not found, stop matching
+                    }
                 }
             },
             Side::SELL => {
-                let mut remaining_qty = o.quantity;
-                if let Some(queue) = self.bids.get_mut(&price) {
-                    for resting in queue.iter_mut() {
-                        if remaining_qty == 0 { break; }
-                        let fill_qty = std::cmp::min(remaining_qty, resting.remaining);
-                        resting.remaining -= fill_qty;
-                        remaining_qty -= fill_qty;
-                        events.push(Event::Fill {
-                            taker_id: o.id,
-                            maker_id: resting.id,
-                            price,
-                            qty: fill_qty,
-                            ts
-                        });
-                        debug!(taker_id=o.id, maker_id=resting.id, price=price, qty=fill_qty, "Fill executed");
+                // Walk the book from best bid downward until filled or price < limit
+                while remaining_qty > 0 {
+                    let best_bid_price = match self.best_bid() {
+                        Some((price, _)) => price,
+                        None => break, // No liquidity available
+                    };
+                    
+                    // Stop if best bid price is lower than our limit
+                    if best_bid_price < price {
+                        break;
                     }
-
+                    
+                    // Fill against this price level
+                    if let Some(queue) = self.bids.get_mut(&best_bid_price) {
+                        let filled_qty = Self::fill_against_level(o.id, remaining_qty, best_bid_price, queue, ts, &mut events);
+                        remaining_qty -= remaining_qty - filled_qty;
+                        
+                        // Remove empty price levels
+                        if queue.is_empty() || queue.iter().all(|r| !r.active || r.remaining == 0) {
+                            self.bids.remove(&best_bid_price);
+                        }
+                    } else {
+                        break; // Level not found, stop matching
+                    }
                 }
             }
         }
 
-        // Add the resting order and combine events
-        let resting_result = self.add_resting_order(o, price, ts);
-        events.extend(resting_result.events);
+        // Only add the order to the book if there's remaining quantity after matching
+        if remaining_qty > 0 {
+            let resting_result = self.add_resting_order(o, price, ts);
+            events.extend(resting_result.events);
+        } else {
+            // Order was fully matched, add a Done event
+            events.push(Event::Done {id: o.id, reason: DoneReason::Filled, ts});
+        }
+        
+        // Record limit order execution latency
+        let limit_order_latency = start_time.elapsed();
+        metrics::histogram!("lobx_limit_order_latency_ns").record(limit_order_latency.as_nanos() as f64);
+        debug!(
+            id=o.id,
+            limit_order_latency_ns = limit_order_latency.as_nanos(),
+            "Limit order execution completed"
+        );
+        
         SubmitResult { events }
     }
 
     fn add_resting_order(&mut self, o: &Order, price: i64, ts: u64) -> SubmitResult {
+        let start_time = Instant::now();
+        
         let resting = Resting {
             id: o.id,
             price: o.price, 
@@ -247,6 +282,15 @@ impl Book {
         self.id_index.insert(order_id, (side, price));
         debug!(id=order_id, price=price, side=?side, "Added order to book");
 
+        // Record order resting latency
+        let resting_latency = start_time.elapsed();
+        metrics::histogram!("lobx_order_resting_latency_ns").record(resting_latency.as_nanos() as f64);
+        debug!(
+            id=order_id,
+            resting_latency_ns = resting_latency.as_nanos(),
+            "Order resting operation completed"
+        );
+
         SubmitResult {
             events: vec![Event::Done {id: o.id, reason: DoneReason::Rested, ts}]
         }
@@ -254,6 +298,7 @@ impl Book {
 
     #[instrument(skip(self, o), fields(order_id = o.id, side = ?o.side, price = ?o.price))]
     pub fn execute_market_order(&mut self, o: &Order, ts: u64) -> SubmitResult {
+        let start_time = Instant::now();
         debug!(id=o.id, qty=o.quantity, side=?o.side, "Executing market order");
         
         let mut events = vec![];
@@ -263,6 +308,16 @@ impl Book {
         };
         
         self.finalize_market_order(o.id, o.quantity, remaining_qty, ts, &mut events);
+        
+        // Record market order execution latency
+        let market_order_latency = start_time.elapsed();
+        metrics::histogram!("lobx_market_order_latency_ns").record(market_order_latency.as_nanos() as f64);
+        debug!(
+            id=o.id,
+            market_order_latency_ns = market_order_latency.as_nanos(),
+            "Market order execution completed"
+        );
+        
         SubmitResult { events }
     }
 
@@ -309,11 +364,15 @@ impl Book {
     }
 
     fn fill_against_level(taker_id: u64, mut remaining_qty: u64, price: i64, queue: &mut VecDeque<Resting>, ts: u64, events: &mut Vec<Event>) -> u64 {
+        let start_time = Instant::now();
+        let mut fills_count = 0;
+        
         for resting_order in queue {
             if resting_order.active && resting_order.remaining > 0 && remaining_qty > 0 {
                 let fill_qty = std::cmp::min(remaining_qty, resting_order.remaining);
                 resting_order.remaining -= fill_qty;
                 remaining_qty -= fill_qty;
+                fills_count += 1;
                 
                 debug!(taker_id=taker_id, maker_id=resting_order.id, price=price, qty=fill_qty, "Fill executed");
                 
@@ -328,6 +387,19 @@ impl Book {
                 if remaining_qty == 0 { break; }
             }
         }
+        
+        // Record order matching latency
+        let matching_latency = start_time.elapsed();
+        metrics::histogram!("lobx_order_matching_latency_ns").record(matching_latency.as_nanos() as f64);
+        if fills_count > 0 {
+            debug!(
+                taker_id=taker_id,
+                fills_count=fills_count,
+                matching_latency_ns = matching_latency.as_nanos(),
+                "Order matching completed"
+            );
+        }
+        
         remaining_qty
     }
 
@@ -347,6 +419,7 @@ impl Book {
     }
 
     pub fn cancel_limit_order(&mut self, o: Order, ts: u64) -> Option<SubmitResult> {
+        let start_time = Instant::now();
         debug!(id=o.id, "Attempting to cancel limit order");
         // Look up order id in id_index hashmap
         // Extract the tuple represeting the (Side, Price)
@@ -375,10 +448,27 @@ impl Book {
                             counter += 1;
                         }
 
+                        // Record cancel order latency for successful cancellation
+                        let cancel_latency = start_time.elapsed();
+                        metrics::histogram!("lobx_cancel_order_latency_ns").record(cancel_latency.as_nanos() as f64);
+                        debug!(
+                            id=o.id,
+                            cancel_latency_ns = cancel_latency.as_nanos(),
+                            "Cancel order operation completed"
+                        );
+
                         Some(SubmitResult {events: vec![Event::Done {id: o.id, reason: DoneReason::Cancelled, ts}]})
                     }
 
                     else {
+                        // Record cancel order latency for failed cancellation
+                        let cancel_latency = start_time.elapsed();
+                        metrics::histogram!("lobx_cancel_order_latency_ns").record(cancel_latency.as_nanos() as f64);
+                        debug!(
+                            id=o.id,
+                            cancel_latency_ns = cancel_latency.as_nanos(),
+                            "Cancel order operation completed"
+                        );
                         None
                     }
                 }
@@ -394,11 +484,29 @@ impl Book {
 
                             counter += 1;
                         }
+                        
+                        // Record cancel order latency for successful cancellation
+                        let cancel_latency = start_time.elapsed();
+                        metrics::histogram!("lobx_cancel_order_latency_ns").record(cancel_latency.as_nanos() as f64);
+                        debug!(
+                            id=o.id,
+                            cancel_latency_ns = cancel_latency.as_nanos(),
+                            "Cancel order operation completed"
+                        );
+                        
                         Some(SubmitResult {events: vec![Event::Done {id: o.id, reason: DoneReason::Cancelled, ts}]})
 
                     }
 
                     else {
+                        // Record cancel order latency for failed cancellation
+                        let cancel_latency = start_time.elapsed();
+                        metrics::histogram!("lobx_cancel_order_latency_ns").record(cancel_latency.as_nanos() as f64);
+                        debug!(
+                            id=o.id,
+                            cancel_latency_ns = cancel_latency.as_nanos(),
+                            "Cancel order operation completed"
+                        );
                         None
                     }
                 }
@@ -406,6 +514,14 @@ impl Book {
         }
 
         else {
+            // Record cancel order latency for order not found
+            let cancel_latency = start_time.elapsed();
+            metrics::histogram!("lobx_cancel_order_latency_ns").record(cancel_latency.as_nanos() as f64);
+            debug!(
+                id=o.id,
+                cancel_latency_ns = cancel_latency.as_nanos(),
+                "Cancel order operation completed"
+            );
             None
         }
 
@@ -542,7 +658,7 @@ mod tests {
         let (taker_id, result) = book.submit(&req2);
         assert_eq!(result.events.len(), 2);
         assert_eq!(result.events[0], Event::Fill {taker_id, maker_id, price: 10, qty: 10, ts});
-        assert_eq!(result.events[1], Event::Done {id: taker_id, reason: DoneReason::Rested, ts});
+        assert_eq!(result.events[1], Event::Done {id: taker_id, reason: DoneReason::Filled, ts});
     }
 
     #[test]
@@ -567,6 +683,146 @@ mod tests {
         
         let (order_id, _) = book.submit(&req);
         assert_eq!(order_id, 1); // Should still get an ID even if no liquidity
+    }
+
+    #[test]
+    fn test_no_negative_spread_buy_limit_matches_lower_ask() {
+        let mut book = Book::new();
+        
+        // Add a SELL order at price 11
+        let sell_req = OrderRequest {side: Side::SELL, price: Some(11), quantity: 100};
+        let (sell_id, _) = book.submit(&sell_req);
+        assert_eq!(sell_id, 1);
+        
+        // Add a BUY order at price 50 (should match against SELL at 11)
+        let buy_req = OrderRequest {side: Side::BUY, price: Some(50), quantity: 50};
+        let (buy_id, result) = book.submit(&buy_req);
+        assert_eq!(buy_id, 2);
+        
+        // Should have a fill event
+        assert_eq!(result.events.len(), 2);
+        assert!(matches!(result.events[0], Event::Fill {..}));
+        assert!(matches!(result.events[1], Event::Done {..}));
+        
+        // Check that spread is not negative
+        if let Some(spread) = book.spread() {
+            assert!(spread >= 0, "Spread should not be negative, got: {}", spread);
+        }
+        
+        // Verify the SELL order was partially filled
+        let best_ask = book.best_ask();
+        assert!(best_ask.is_some());
+        if let Some((price, qty)) = best_ask {
+            assert_eq!(price, 11);
+            assert_eq!(qty, 50); // 100 - 50 = 50 remaining
+        }
+    }
+
+    #[test]
+    fn test_no_negative_spread_sell_limit_matches_higher_bid() {
+        let mut book = Book::new();
+        
+        // Add a BUY order at price 50
+        let buy_req = OrderRequest {side: Side::BUY, price: Some(50), quantity: 100};
+        let (buy_id, _) = book.submit(&buy_req);
+        assert_eq!(buy_id, 1);
+        
+        // Add a SELL order at price 11 (should match against BUY at 50)
+        let sell_req = OrderRequest {side: Side::SELL, price: Some(11), quantity: 30};
+        let (sell_id, result) = book.submit(&sell_req);
+        assert_eq!(sell_id, 2);
+        
+        // Should have a fill event
+        assert_eq!(result.events.len(), 2);
+        assert!(matches!(result.events[0], Event::Fill {..}));
+        assert!(matches!(result.events[1], Event::Done {..}));
+        
+        // Check that spread is not negative
+        if let Some(spread) = book.spread() {
+            assert!(spread >= 0, "Spread should not be negative, got: {}", spread);
+        }
+        
+        // Verify the BUY order was partially filled
+        let best_bid = book.best_bid();
+        assert!(best_bid.is_some());
+        if let Some((price, qty)) = best_bid {
+            assert_eq!(price, 50);
+            assert_eq!(qty, 70); // 100 - 30 = 70 remaining
+        }
+    }
+
+    #[test]
+    fn test_walk_the_book_multiple_levels() {
+        let mut book = Book::new();
+        
+        // Add multiple SELL orders at different price levels
+        let sell_req1 = OrderRequest {side: Side::SELL, price: Some(10), quantity: 20};
+        let sell_req2 = OrderRequest {side: Side::SELL, price: Some(12), quantity: 30};
+        let sell_req3 = OrderRequest {side: Side::SELL, price: Some(15), quantity: 25};
+        
+        book.submit(&sell_req1);
+        book.submit(&sell_req2);
+        book.submit(&sell_req3);
+        
+        // Add a BUY order that should match against all three levels
+        let buy_req = OrderRequest {side: Side::BUY, price: Some(20), quantity: 50};
+        let (buy_id, result) = book.submit(&buy_req);
+        
+        // Should have multiple fill events (20 + 30 = 50, so only 2 fills needed)
+        let fill_events: Vec<_> = result.events.iter().filter(|e| matches!(e, Event::Fill {..})).collect();
+        assert_eq!(fill_events.len(), 2); // Should fill against first two levels
+        
+        // Check that spread is not negative
+        if let Some(spread) = book.spread() {
+            assert!(spread >= 0, "Spread should not be negative, got: {}", spread);
+        }
+        
+        // Verify remaining quantities
+        let best_ask = book.best_ask();
+        assert!(best_ask.is_some());
+        if let Some((price, qty)) = best_ask {
+            assert_eq!(price, 15); // Highest remaining ask
+            assert_eq!(qty, 25); // 25 remaining at price 15
+        }
+    }
+
+    #[test]
+    fn test_limit_order_no_match_rests_correctly() {
+        let mut book = Book::new();
+        
+        // Add a SELL order at price 20
+        let sell_req = OrderRequest {side: Side::SELL, price: Some(20), quantity: 100};
+        book.submit(&sell_req);
+        
+        // Add a BUY order at price 10 (should not match, should rest)
+        let buy_req = OrderRequest {side: Side::BUY, price: Some(10), quantity: 50};
+        let (buy_id, result) = book.submit(&buy_req);
+        
+        // Should only have a Done event (rested)
+        assert_eq!(result.events.len(), 1);
+        assert!(matches!(result.events[0], Event::Done {..}));
+        
+        // Check that spread is positive
+        if let Some(spread) = book.spread() {
+            assert!(spread > 0, "Spread should be positive, got: {}", spread);
+            assert_eq!(spread, 10); // 20 - 10 = 10
+        }
+        
+        // Verify both orders are in the book
+        let best_bid = book.best_bid();
+        let best_ask = book.best_ask();
+        assert!(best_bid.is_some());
+        assert!(best_ask.is_some());
+        
+        if let Some((bid_price, bid_qty)) = best_bid {
+            assert_eq!(bid_price, 10);
+            assert_eq!(bid_qty, 50);
+        }
+        
+        if let Some((ask_price, ask_qty)) = best_ask {
+            assert_eq!(ask_price, 20);
+            assert_eq!(ask_qty, 100);
+        }
     }
 }
 
