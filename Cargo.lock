@@ -1587,6 +1587,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "quickcheck",
+ "rand 0.8.5",
  "ratatui",
  "reqwest",
  "rusqlite",
