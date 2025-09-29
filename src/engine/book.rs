@@ -6,7 +6,7 @@ use crate::engine::types::{DoneReason, Order, OrderRequest, SubmitResult, Restin
 use std::time::Instant;
 use tracing::{info, debug, warn, trace, error, instrument};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Book {
     pub bids: BTreeMap<i64, VecDeque<Resting>>,
     pub asks: BTreeMap<i64, VecDeque<Resting>>,
