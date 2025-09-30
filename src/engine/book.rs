@@ -11,7 +11,7 @@ pub struct Book {
     pub bids: BTreeMap<i64, VecDeque<Resting>>,
     pub asks: BTreeMap<i64, VecDeque<Resting>>,
     pub id_index: HashMap<u64, (Side, i64)>,
-    next_order_id: u64,
+    pub next_order_id: u64,
 }
 
 impl Book {

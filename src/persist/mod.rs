@@ -12,16 +12,17 @@ pub trait SnapshotStore {
 
 }
 
+#[async_trait]
 pub trait WalStore {
-    async fn append_op(&Op) -> Result<(), Op>;
-    async fn relay_ops() -> Result<Vec<Op>, ()>;
-    async fn rotate() -> PersistResult<()>;
+    async fn append_op(&mut self, wal: &WalOp) -> PersistResult<()>;
+    async fn relay_ops(&self, id: i64) -> PersistResult<Vec<(i64, WalOp)>>;
 }
 
+#[async_trait]
 pub trait PersistenceEngine {
     async fn restore() -> PersistResult<Option<SnapshotData>>;
-    async fn replay() -> Result<Vec<Op>, ()>;
-    async fn record(&Op) -> Result<(), Op>;
+    async fn replay() -> PersistResult<()>;
+    async fn record(wal: &WalOp) -> PersistResult<()>;
     async fn checkpoint(snapshot:&SnapshotData) -> PersistResult<()>;
     
 }

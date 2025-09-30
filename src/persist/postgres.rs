@@ -5,6 +5,8 @@ use crate::persist::SNAPSHOT_SCHEMA_VERSION;
 use sqlx::Row;
 use crate::persist::SnapshotLevel;
 use crate::engine::types::Side;
+use crate::persist::wal::{op_to_json, op_from_json};
+use crate::persist::{WalStore, WalOp};
 
 use crate::persist::SnapshotStore;
 struct PostgresSnapshotStore {
@@ -40,32 +42,11 @@ impl SnapshotStore for PostgresSnapshotStore {
         .map_err(|e| PersistanceError::IoFailure)?;
 
         if let Some(row) = snapshot {
-            let schema_version: i32 = row.get("schema_version");
-            let wal_high_watermark: i64 = row.get("wal_high_watermark");
-            let bid_side_json: String = row.get("bid_side");
-            let ask_side_json: String = row.get("ask_side");
-            let id_index_json: String = row.get("id_index");
-            let next_order_id: i64 = row.get("next_order_id");
-
-            let bid_side: Vec<SnapshotLevel> = serde_json::from_str(&bid_side_json)
-                .map_err(|_| PersistanceError::FormatMismatch)?;
-            let ask_side: Vec<SnapshotLevel> = serde_json::from_str(&ask_side_json)
-                .map_err(|_| PersistanceError::FormatMismatch)?;
-            let id_index: Vec<(u64, Side, u64)> = serde_json::from_str(&id_index_json)
+            let snapshot_json: String = row.get("snapshot_json");
+            let mut snapshot: SnapshotData = serde_json::from_str(&snapshot_json)
                 .map_err(|_| PersistanceError::FormatMismatch)?;
 
-            if schema_version != SNAPSHOT_SCHEMA_VERSION as i32 {
-                return Err(PersistanceError::FormatMismatch);
-            }
-
-            let snapshot = SnapshotData {
-                version: schema_version as u32,
-                bid_side: bid_side,
-                ask_side: ask_side,
-                id_index: id_index,
-                next_order_id: next_order_id as u64,
-                wal_high_watermark,
-            };
+            snapshot.wal_high_watermark = row.get("wal_high_watermark");
 
             return PersistResult::Ok(Some(snapshot));
         }
@@ -73,16 +54,17 @@ impl SnapshotStore for PostgresSnapshotStore {
         Ok(None) // Placeholder
     }
 
-    async fn save_snapshot(&mut self, snapshotData: &SnapshotData) -> PersistResult<()> {
+    async fn save_snapshot(&mut self, snapshot_data: &SnapshotData) -> PersistResult<()> {
         // Implementation to save snapshot to PostgreSQL
         let wal = sqlx::query::<sqlx::Postgres>(
             "select coalesce(max(id), 0) from wal where symbol = $1"
         )
+        .bind(&self.symbol)
         .fetch_optional(&self.connection_pool)
         .await
         .map_err(|_| PersistanceError::IoFailure)?;
 
-        let mut sp_data = snapshotData.clone();
+        let mut sp_data = snapshot_data.clone();
         if let Some(row) = wal {
             let wal: i64 = row.get(0);
             sp_data.wal_high_watermark = wal;
@@ -91,10 +73,14 @@ impl SnapshotStore for PostgresSnapshotStore {
 
             sqlx::query(
                 r#"
-                INSERT INTO snapshots (snapshot_json)
+                INSERT INTO snapshots (symbol, schema_version, wal_high_watermark, snapshot_json)VALUES ($1, $2, $3, $4)
                 "#,
-            ).bind(&snapshot_json)
-            .fetch_optional(&self.connection_pool).await
+            )
+            .bind(&snapshot_json)
+            .bind(&self.symbol)
+            .bind(SNAPSHOT_SCHEMA_VERSION as i32)
+            .bind(sp_data.wal_high_watermark)
+            .execute(&self.connection_pool).await
             .map_err(|_| PersistanceError::IoFailure)?;
 
             PersistResult::Ok(())
@@ -102,4 +88,68 @@ impl SnapshotStore for PostgresSnapshotStore {
             Err(PersistanceError::IoFailure)
         }
     }
+}
+
+struct PostgresWalStore {
+    pool: sqlx::PgPool,
+    symbol: String,
+}
+
+impl PostgresWalStore {
+    pub async fn new(database_url: &str, symbol: &str) -> Self {
+        let pool = sqlx::PgPool::connect(database_url).await.unwrap();
+        Self { pool, symbol: symbol.to_string() }
+    }
+}
+
+#[async_trait::async_trait]
+impl WalStore for PostgresWalStore {
+    async fn append_op(&mut self, op: &WalOp) -> PersistResult<()> {
+        // This signature should take &self — adjust your trait in mod.rs to:
+        // async fn append_op(&self, op: &WalOp) -> PersistResult<()>;
+        // (same for relay_ops/rotate)
+        let json_string = op_to_json(op)?;
+        sqlx::query(
+            r#"
+            INSERT INTO wal (symbol, op_json) VALUES ($1, $2)
+            "#
+        )
+        .bind(&self.symbol)
+        .bind(&json_string)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| PersistanceError::IoFailure)?;
+
+        Ok(())
+    }
+
+    async fn relay_ops(&self, after_id: i64) -> PersistResult<Vec<(i64, WalOp)>> {
+        // read WAL rows strictly greater than `after_id`
+        let rows = sqlx::query(
+            r#"
+            SELECT id, op_json
+            FROM wal
+            WHERE symbol = $1 AND id > $2
+            ORDER BY id ASC
+            "#
+        )
+        .bind(&self.symbol)
+        .bind(after_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| PersistanceError::IoFailure)?;
+
+        let mut ops = Vec::new();
+        for row in rows {
+            let id: i64 = row.get("id");
+            let op_json: String = row.get("op_json");
+
+            let op = op_from_json(&op_json)?;
+            ops.push((id, op));
+        }
+
+        Ok(ops)
+    }
+
+
 }
