@@ -1,5 +1,6 @@
 use crate::engine::types::{Resting, Side};
 
+#[derive(Debug)]
 pub enum PersistanceError{
     IoFailure,
     SerializationFailure,
@@ -8,6 +9,21 @@ pub enum PersistanceError{
     NotFound,
     Other(String),
 }
+
+impl std::fmt::Display for PersistanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PersistanceError::SerializationFailure => write!(f, "Serialization error"),
+            PersistanceError::NotFound => write!(f, "Not found"),
+            PersistanceError::FormatMismatch => write!(f, "Format mismatch"),
+            PersistanceError::IoFailure => write!(f, "I/O failure"),
+            PersistanceError::CorruptWalRecord => write!(f, "Corrupt WAL record"),
+            PersistanceError::Other(msg) => write!(f, "Other error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for PersistanceError {}
 
 pub type PersistResult<T> = Result<T, PersistanceError>;
 
@@ -25,7 +41,7 @@ pub struct SnapshotData {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct SnapshotLevel {
-    pub price: i64,
+    pub price: u64,
     pub orders: Vec<SnapshotResting>
 }
 

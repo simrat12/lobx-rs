@@ -1,4 +1,4 @@
-//! Pure conversions between your in-memory `Book` and the serializable snapshot types.
+//! Pure conversions between in-memory `Book` and the serializable snapshot types.
 //!
 //! This file MUST NOT talk to the database. Only struct <-> struct mapping lives here.
 
@@ -10,7 +10,6 @@ use crate::persist::types::{
 use std::collections::VecDeque;
 
 /// Build a `SnapshotData` from the current in-memory `Book`.
-/// - NO database here.
 /// - Do NOT set `wal_high_watermark` (leave it 0 here; DB layer stamps it when saving).
 pub fn from_book(book: &Book) -> SnapshotData {
     // STEP 1: create Vec<SnapshotLevel> for bids.
@@ -66,7 +65,7 @@ pub fn from_book(book: &Book) -> SnapshotData {
     //
     // RETURN: the SnapshotData value.
 
-    // placeholder so file compiles for now — replace with your implementation
+
     SnapshotData {
         version: SNAPSHOT_SCHEMA_VERSION,
         bid_side,
@@ -78,7 +77,6 @@ pub fn from_book(book: &Book) -> SnapshotData {
 
 /// Apply a previously saved snapshot into a fresh `Book`.
 /// - Clears the book and repopulates all structures from the snapshot payload.
-/// - NO database here.
 pub fn apply_to_book(book: &mut Book, snap: &SnapshotData) -> PersistResult<()> {
     // STEP 1: clear existing state:
     //   book.bids.clear();
@@ -137,27 +135,13 @@ pub fn apply_to_book(book: &mut Book, snap: &SnapshotData) -> PersistResult<()> 
     book.next_order_id = snap.next_order_id;
     // STEP 6: return Ok(())
 
-    // placeholder — replace with your implementation
+    // Placholder for now
     Ok(())
 }
 
 /// (Optional for now) Apply a single WAL operation to the in-memory `Book`.
 /// Use this during startup replay to catch up from the snapshot.
-/// If you cannot inject order IDs into your existing submit path yet,
-/// you can leave this unimplemented and come back once you add such an internal API.
 pub fn apply_op(_book: &mut Book, _op: &WalOp) -> PersistResult<()> {
-    // Two approaches:
-    //
-    // A) Reuse your existing engine functions
-    //    - For limit/market submitted: call your submit path.
-    //      NOTE: your current submit auto-generates `id`. For perfect replay,
-    //      add an internal method that accepts a preassigned `id` (e.g., `submit_with_id`).
-    //    - For cancel: call your cancel path.
-    //
-    // B) Mutate the book struct directly (mirror exactly what submit/cancel do).
-    //
-    // For now, if you don’t have (A) ready, leave a `todo!()` and wire it later.
-
-    // placeholder — implement after you decide A or B
+    // Placholder for now
     Ok(())
 }

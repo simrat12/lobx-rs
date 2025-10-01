@@ -1,11 +1,7 @@
-//! Helpers for encoding/decoding WAL operations.
-//!
-//! This module PURPOSELY knows nothing about the database driver.
-//! Keep it pure JSON <-> Rust types so the DB layer is simpler.
 
 use crate::persist::types::{PersistResult, PersistanceError, WalOp};
 
-/// Convert a WAL op into a JSON string you can store in the DB.
+/// Convert a WAL op into a JSON string 
 pub fn op_to_json(op: &WalOp) -> PersistResult<String> {
     // STEP 1: use serde_json::to_string(op)
     // STEP 2: map serde errors to PersistanceError::SerializationFailure
@@ -27,6 +23,5 @@ pub fn op_from_json(s: &str) -> PersistResult<WalOp> {
     let wal_op: WalOp = serde_json::from_str(s)
         .map_err(|_| PersistanceError::FormatMismatch)?;
 
-    // placeholder — replace with your implementation
     PersistResult::Ok(wal_op)
 }

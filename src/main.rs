@@ -1,249 +1,207 @@
-mod engine;
-use engine::book::Book;
-use engine::types::{Order, OrderRequest, Side};
-use std::collections::HashMap;
+use std::env;
 use std::io::{self, Write};
-use tracing_subscriber::EnvFilter;
-use anyhow::Result;
-use lobx_rs::telemetry;
-use std::io::IsTerminal;
-use std::time::Duration;
-use std::thread;
-use rand::Rng;
+use lobx_rs::persist::postgres::PostgresSnapshotStore;
+use lobx_rs::persist::postgres::PostgresWalStore;
+use lobx_rs::persist::{SnapshotStore, WalStore};
+use lobx_rs::persist::snapshot;
+use lobx_rs::engine::book::Book;
+use lobx_rs::engine::types::{OrderRequest, Side};
 
-fn print_top(book: &Book) {
-    let bb = book.best_bid().map(|(p,q)| format!("BID=({p}, {q})")).unwrap_or("BID=None".into());
-    let ba = book.best_ask().map(|(p,q)| format!("ASK=({p}, {q})")).unwrap_or("ASK=None".into());
-    let spread = book.spread().map(|s| format!("SPREAD={s}")).unwrap_or("SPREAD=None".into());
-    println!("TOP: {bb}  {ba}  {spread}");
-}
-
-fn parse_side(s: &str) -> Option<Side> {
-    match s.to_ascii_uppercase().as_str() {
-        "BUY" => Some(Side::BUY),
-        "SELL" => Some(Side::SELL),
-        _ => None
+// Helper function to count total resting orders across both sides
+fn count_resting_orders(book: &Book) -> (usize, usize, usize) {
+    let mut bid_orders = 0;
+    let mut ask_orders = 0;
+    
+    for queue in book.bids.values() {
+        bid_orders += queue.len();
     }
+    
+    for queue in book.asks.values() {
+        ask_orders += queue.len();
+    }
+    
+    (book.bids.len(), book.asks.len(), bid_orders + ask_orders)
 }
 
-fn generate_random_price() -> i64 {
-    let mut rng = rand::thread_rng();
-    (rng.gen_range(10..110)) as i64
-}
-
-fn generate_random_quantity() -> u64 {
-    let mut rng = rand::thread_rng();
-    (rng.gen_range(10..110)) as u64
-}
-
-fn generate_random_side() -> Side {
-    let mut rng = rand::thread_rng();
-    if rng.gen_bool(0.5) {
-        Side::BUY
+// Helper function to print state summary
+fn print_state_summary(book: &Book) {
+    let (bid_levels, ask_levels, total_orders) = count_resting_orders(book);
+    
+    println!("\n=== Book State Summary ===");
+    println!("Bid levels: {}, Ask levels: {}, Total orders: {}", bid_levels, ask_levels, total_orders);
+    
+    if let Some((price, qty)) = book.best_bid() {
+        println!("Best bid: {} @ {}", qty, price);
     } else {
-        Side::SELL
-    }
-}
-
-fn generate_orders(book: &mut Book, order_history: &mut HashMap<u64, Order>, count: u32, order_type: &str) {
-    println!("🚀 Generating {} {} orders...", count, order_type);
-    
-    for i in 1..=count {
-        let side = generate_random_side();
-        let quantity = generate_random_quantity();
-        
-        match order_type {
-            "random" => {
-                let mut rng = rand::thread_rng();
-                let is_limit = rng.gen_bool(0.5);
-                if is_limit {
-                    let price = generate_random_price();
-                    let req = OrderRequest { side, price: Some(price), quantity };
-                    let (order_id, res) = book.submit(&req);
-                    let o = Order { id: order_id, side, price: Some(price), quantity };
-                    order_history.insert(order_id, o);
-                    println!("Order {}: limit {:?} {} {}", order_id, side, price, quantity);
-                } else {
-                    let req = OrderRequest { side, price: None, quantity };
-                    let (order_id, res) = book.submit(&req);
-                    let o = Order { id: order_id, side, price: None, quantity };
-                    order_history.insert(order_id, o);
-                    println!("Order {}: market {:?} {}", order_id, side, quantity);
-                }
-            }
-            "aggressive_buy" => {
-                let price = 50 + i as i64 * 2; // Increasing prices
-                let req = OrderRequest { side: Side::BUY, price: Some(price), quantity };
-                let (order_id, res) = book.submit(&req);
-                let o = Order { id: order_id, side: Side::BUY, price: Some(price), quantity };
-                order_history.insert(order_id, o);
-                println!("Order {}: limit BUY {} {}", order_id, price, quantity);
-            }
-            "aggressive_sell" => {
-                let price = 150 - i as i64 * 2; // Decreasing prices
-                let req = OrderRequest { side: Side::SELL, price: Some(price), quantity };
-                let (order_id, res) = book.submit(&req);
-                let o = Order { id: order_id, side: Side::SELL, price: Some(price), quantity };
-                order_history.insert(order_id, o);
-                println!("Order {}: limit SELL {} {}", order_id, price, quantity);
-            }
-            "market" => {
-                let req = OrderRequest { side, price: None, quantity };
-                let (order_id, res) = book.submit(&req);
-                let o = Order { id: order_id, side, price: None, quantity };
-                order_history.insert(order_id, o);
-                println!("Order {}: market {:?} {}", order_id, side, quantity);
-            }
-            "spread" => {
-                let buy_price = 50 + i as i64;
-                let sell_price = 100 + i as i64;
-                let buy_qty = generate_random_quantity();
-                let sell_qty = generate_random_quantity();
-                
-                // Buy order
-                let req = OrderRequest { side: Side::BUY, price: Some(buy_price), quantity: buy_qty };
-                let (order_id, res) = book.submit(&req);
-                let o = Order { id: order_id, side: Side::BUY, price: Some(buy_price), quantity: buy_qty };
-                order_history.insert(order_id, o);
-                println!("Order {}: limit BUY {} {}", order_id, buy_price, buy_qty);
-                
-                // Sell order
-                let req = OrderRequest { side: Side::SELL, price: Some(sell_price), quantity: sell_qty };
-                let (order_id, res) = book.submit(&req);
-                let o = Order { id: order_id, side: Side::SELL, price: Some(sell_price), quantity: sell_qty };
-                order_history.insert(order_id, o);
-                println!("Order {}: limit SELL {} {}", order_id, sell_price, sell_qty);
-            }
-            _ => {}
-        }
-        
-        // Small delay between orders
-        thread::sleep(Duration::from_millis(50));
-        
-        if i % 10 == 0 {
-            print_top(book);
-        }
+        println!("Best bid: None");
     }
     
-    println!("✅ Generated {} {} orders! Check your Grafana dashboard at http://localhost:3000", count, order_type);
-    print_top(book);
+    if let Some((price, qty)) = book.best_ask() {
+        println!("Best ask: {} @ {}", qty, price);
+    } else {
+        println!("Best ask: None");
+    }
+    
+    if let Some(spread) = book.spread() {
+        println!("Spread: {}", spread);
+    } else {
+        println!("Spread: N/A");
+    }
+    println!("========================\n");
 }
 
-fn main() -> anyhow::Result<()> {
-    telemetry::init_tracing("lobx_rs=info");
-    telemetry::init_metrics();
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok(); // load .env
 
+    let db_url = env::var("DATABASE_URL")?;
+    let symbol = env::var("LOBX_SYMBOL").unwrap_or_else(|_| "BTC-USD".to_string());
+
+    // Build stores (both can share a PgPool internally)
+    let mut snap_store = PostgresSnapshotStore::new(&db_url, &symbol).await;
+    let wal_store = PostgresWalStore::new(&db_url, &symbol).await;
+
+    // Make a fresh in-memory book
     let mut book = Book::new();
-    let mut order_history: HashMap<u64, Order> = HashMap::new();
 
-    // Check if we're in automated mode (input from pipe)
-    let is_automated = !io::stdin().is_terminal();
-    
-    if !is_automated {
-        println!("LOBX Order Engine - Choose an option:");
-        println!("  1. Generate 50 random orders (mixed types)");
-        println!("  2. Generate 100 aggressive buy orders");
-        println!("  3. Generate 100 aggressive sell orders");
-        println!("  4. Generate 200 market orders");
-        println!("  5. Generate 500 spread trading orders");
-        println!("  6. Manual order entry");
-        println!("  7. Show current book state");
-        println!("  8. Quit");
-        println!("");
-        println!("Manual Commands (when in manual mode):");
-        println!("  limit BUY  <price> <qty>");
-        println!("  limit SELL <price> <qty>");
-        println!("  market BUY  <qty>");
-        println!("  market SELL <qty>");
-        println!("  cancel <order_id>");
-        println!("  top    (print best bid/ask)");
-        println!("  quit");
+    // 1) Restore the latest snapshot (if any)
+    if let Ok(Some(snapshot)) = snap_store.load_snapshot(&symbol).await {
+        if let Err(e) = snapshot::apply_to_book(&mut book, &snapshot) {
+            eprintln!("Error applying snapshot to book: {:?}", e);
+            return Err(e.into());
+        }
+        let watermark = snapshot.wal_high_watermark;
+
+        // 2) Relay (replay) all WAL ops after that watermark
+        let ops = wal_store.relay_ops(watermark).await?;
+        for (_id, op) in ops {
+            snapshot::apply_op(&mut book, &op)?;
+        }
+        println!("Restored book from snapshot and replayed {} WAL operations", watermark);
     } else {
-        println!("LOBX running in automated mode");
+        println!("No snapshot found, starting with empty book");
     }
-    print_top(&book);
 
-    let stdin = io::stdin();
+    // CLI loop
     loop {
-        if !is_automated {
-            print!("> "); 
-            let _ = io::stdout().flush();
-        }
-        let mut line = String::new();
-        if stdin.read_line(&mut line).is_err() { break; }
-        let t: Vec<_> = line.split_whitespace().collect();
-        if t.is_empty() { continue; }
+        print!("\nLOBX CLI> ");
+        io::stdout().flush()?;
         
-        // Handle menu options
-        if t.len() == 1 {
-            match t[0] {
-                "1" => generate_orders(&mut book, &mut order_history, 50, "random"),
-                "2" => generate_orders(&mut book, &mut order_history, 100, "aggressive_buy"),
-                "3" => generate_orders(&mut book, &mut order_history, 100, "aggressive_sell"),
-                "4" => generate_orders(&mut book, &mut order_history, 200, "market"),
-                "5" => generate_orders(&mut book, &mut order_history, 500, "spread"),
-                "6" => {
-                    println!("Manual mode - enter orders directly:");
-                    println!("  limit BUY  <price> <qty>");
-                    println!("  limit SELL <price> <qty>");
-                    println!("  market BUY  <qty>");
-                    println!("  market SELL <qty>");
-                    println!("  cancel <order_id>");
-                    println!("  top    (print best bid/ask)");
-                    println!("  quit");
-                }
-                "7" => print_top(&book),
-                "8" | "quit" | "q" => break,
-                _ => println!("Invalid option. Choose 1-8."),
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let command = input.trim().to_lowercase();
+        
+        match command.as_str() {
+            "help" | "h" => {
+                println!("Available commands:");
+                println!("  1, buy <price> <qty>  - Submit buy limit order");
+                println!("  2, sell <price> <qty> - Submit sell limit order");
+                println!("  3, market_buy <qty>    - Submit market buy order");
+                println!("  4, market_sell <qty>   - Submit market sell order");
+                println!("  top                    - Show top of book");
+                println!("  snapshot              - Create and save snapshot");
+                println!("  restore               - Load and apply latest snapshot");
+                println!("  quit, q               - Exit");
             }
-        } else {
-            // Handle manual commands
-            match t[0].to_ascii_lowercase().as_str() {
-                "quit" | "q" => break,
-                "top"        => { print_top(&book); }
-                "limit" if t.len()==4 => {
-                    if let (Some(side), Ok(px), Ok(q)) =
-                        (parse_side(t[1]), t[2].parse::<i64>(), t[3].parse::<u64>()) {
-                        let req = OrderRequest { side, price: Some(px), quantity: q };
-                        let (order_id, res) = book.submit(&req);
-                        let o = Order { id: order_id, side, price: Some(px), quantity: q };
-                        order_history.insert(order_id, o);
-                        println!("Order ID: {}, events: {:?}", order_id, res.events);
-                        print_top(&book);
-                    } else { println!("usage: limit BUY|SELL <price> <qty>"); }
-                }
-                "market" if t.len()==3 => {
-                    if let (Some(side), Ok(q)) = (parse_side(t[1]), t[2].parse::<u64>()) {
-                        let req = OrderRequest { side, price: None, quantity: q };
-                        let (order_id, res) = book.submit(&req);
-                        let o = Order { id: order_id, side, price: None, quantity: q };
-                        order_history.insert(order_id, o);
-                        println!("Order ID: {}, events: {:?}", order_id, res.events);
-                        print_top(&book);
-                    } else { println!("usage: market BUY|SELL <qty>"); }
-                }
-                "cancel" if t.len()==2 => {
-                    if let Ok(order_id) = t[1].parse::<u64>() {
-                        if let Some(original_order) = order_history.get(&order_id).cloned() {
-                            let now = std::time::Instant::now();
-                            let ts = now.elapsed().as_secs();
-                            match book.cancel_limit_order(original_order, ts) {
-                                Some(result) => {
-                                    println!("events: {:?}", result.events);
-                                    order_history.remove(&order_id);
-                                }
-                                None => println!("Order {} not found or already cancelled", order_id)
-                            }
-                            print_top(&book);
-                        } else {
-                            println!("Order {} not found in history", order_id);
+            "1" | "buy" => {
+                println!("Enter price and quantity (e.g., '100 10'):");
+                let mut order_input = String::new();
+                io::stdin().read_line(&mut order_input)?;
+                let parts: Vec<&str> = order_input.trim().split_whitespace().collect();
+                if parts.len() == 2 {
+                    if let (Ok(price), Ok(qty)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                        let req = OrderRequest { side: Side::BUY, price: Some(price), quantity: qty };
+                        let (id, result) = book.submit(&req);
+                        println!("Submitted buy order ID {}: {} @ {}", id, qty, price);
+                        for event in result.events {
+                            println!("  Event: {:?}", event);
                         }
-                    } else { println!("usage: cancel <order_id>"); }
+                    } else { println!("Invalid numbers"); }
+                } else { println!("Usage: price quantity"); }
+            }
+            "2" | "sell" => {
+                println!("Enter price and quantity (e.g., '100 10'):");
+                let mut order_input = String::new();
+                io::stdin().read_line(&mut order_input)?;
+                let parts: Vec<&str> = order_input.trim().split_whitespace().collect();
+                if parts.len() == 2 {
+                    if let (Ok(price), Ok(qty)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                        let req = OrderRequest { side: Side::SELL, price: Some(price), quantity: qty };
+                        let (id, result) = book.submit(&req);
+                        println!("Submitted sell order ID {}: {} @ {}", id, qty, price);
+                        for event in result.events {
+                            println!("  Event: {:?}", event);
+                        }
+                    } else { println!("Invalid numbers"); }
+                } else { println!("Usage: price quantity"); }
+            }
+            "3" | "market_buy" => {
+                println!("Enter quantity:");
+                let mut qty_input = String::new();
+                io::stdin().read_line(&mut qty_input)?;
+                if let Ok(qty) = qty_input.trim().parse::<u64>() {
+                    let req = OrderRequest { side: Side::BUY, price: None, quantity: qty };
+                    let (id, result) = book.submit(&req);
+                    println!("Submitted market buy order ID {}: {}", id, qty);
+                    for event in result.events {
+                        println!("  Event: {:?}", event);
+                    }
+                } else { println!("Invalid quantity"); }
+            }
+            "4" | "market_sell" => {
+                println!("Enter quantity:");
+                let mut qty_input = String::new();
+                io::stdin().read_line(&mut qty_input)?;
+                if let Ok(qty) = qty_input.trim().parse::<u64>() {
+                    let req = OrderRequest { side: Side::SELL, price: None, quantity: qty };
+                    let (id, result) = book.submit(&req);
+                    println!("Submitted market sell order ID {}: {}", id, qty);
+                    for event in result.events {
+                        println!("  Event: {:?}", event);
+                    }
+                } else { println!("Invalid quantity"); }
+            }
+            "top" => {
+                print_state_summary(&book);
+            }
+            "snapshot" => {
+                println!("Creating snapshot...");
+                let snap = snapshot::from_book(&book);
+                if let Err(e) = snap_store.save_snapshot(&snap).await {
+                    eprintln!("Error saving snapshot: {:?}", e);
+                } else {
+                    let (bid_levels, ask_levels, total_orders) = count_resting_orders(&book);
+                    println!("✅ Saved snapshot for {}: {} bid levels, {} ask levels, {} total orders", 
+                             symbol, bid_levels, ask_levels, total_orders);
+                    print_state_summary(&book);
                 }
-                _ => println!("unknown cmd"),
+            }
+            "restore" => {
+                println!("Loading latest snapshot...");
+                if let Ok(Some(snap)) = snap_store.load_snapshot(&symbol).await {
+                    book = Book::new(); // Clear current book
+                    if let Err(e) = snapshot::apply_to_book(&mut book, &snap) {
+                        eprintln!("Error applying snapshot: {:?}", e);
+                    } else {
+                        let (bid_levels, ask_levels, total_orders) = count_resting_orders(&book);
+                        println!("✅ Restored snapshot for {}: {} bid levels, {} ask levels, {} total orders", 
+                                 symbol, bid_levels, ask_levels, total_orders);
+                        print_state_summary(&book);
+                    }
+                } else {
+                    println!("❌ No snapshot found to restore");
+                }
+            }
+            "quit" | "q" | "exit" => {
+                println!("Goodbye!");
+                break;
+            }
+            "" => continue,
+            _ => {
+                println!("Unknown command. Type 'help' for available commands.");
             }
         }
     }
-    
+
     Ok(())
 }

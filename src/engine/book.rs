@@ -8,9 +8,9 @@ use tracing::{info, debug, warn, trace, error, instrument};
 
 #[derive(Debug, PartialEq, Eq, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Book {
-    pub bids: BTreeMap<i64, VecDeque<Resting>>,
-    pub asks: BTreeMap<i64, VecDeque<Resting>>,
-    pub id_index: HashMap<u64, (Side, i64)>,
+    pub bids: BTreeMap<u64, VecDeque<Resting>>,
+    pub asks: BTreeMap<u64, VecDeque<Resting>>,
+    pub id_index: HashMap<u64, (Side, u64)>,
     pub next_order_id: u64,
 }
 
@@ -29,7 +29,7 @@ impl Book {
     }
 
     #[instrument(level = "trace")]
-    pub fn best_bid(&self) -> Option<(i64, u64)> {
+    pub fn best_bid(&self) -> Option<(u64, u64)> {
         // Look up the highest price level on the bid side, and sum up all of the associated order quantities
         for (price, queue) in self.bids.iter().rev() {
             let mut counter = 0;
@@ -52,7 +52,7 @@ impl Book {
     }
 
     #[instrument(level = "trace")]
-    pub fn best_ask(&self) -> Option<(i64, u64)> {
+    pub fn best_ask(&self) -> Option<(u64, u64)> {
         // Look up the smallest value on the ask side, and sum up all the associatd quantities
         for (price, queue) in &self.asks {
             let mut counter = 0;
@@ -75,7 +75,7 @@ impl Book {
     }
 
     #[instrument(level = "trace")]
-    pub fn spread(&self) -> Option<i64> {
+    pub fn spread(&self) -> Option<u64> {
         // The difference between the best bid and the best ask
         let best_bid = match self.best_bid() {
             Some((price, _)) => price,
@@ -252,7 +252,7 @@ impl Book {
         SubmitResult { events }
     }
 
-    fn add_resting_order(&mut self, o: &Order, price: i64, ts: u64) -> SubmitResult {
+    fn add_resting_order(&mut self, o: &Order, price: u64, ts: u64) -> SubmitResult {
         let start_time = Instant::now();
         
         let resting = Resting {
@@ -363,7 +363,7 @@ impl Book {
         Self::fill_against_level(order_id, quantity, best_bid_price, queue, ts, events)
     }
 
-    fn fill_against_level(taker_id: u64, mut remaining_qty: u64, price: i64, queue: &mut VecDeque<Resting>, ts: u64, events: &mut Vec<Event>) -> u64 {
+    fn fill_against_level(taker_id: u64, mut remaining_qty: u64, price: u64, queue: &mut VecDeque<Resting>, ts: u64, events: &mut Vec<Event>) -> u64 {
         let start_time = Instant::now();
         let mut fills_count = 0;
         

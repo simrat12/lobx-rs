@@ -9,7 +9,7 @@ use crate::persist::wal::{op_to_json, op_from_json};
 use crate::persist::{WalStore, WalOp};
 
 use crate::persist::SnapshotStore;
-struct PostgresSnapshotStore {
+pub struct PostgresSnapshotStore {
     connection_pool: sqlx::PgPool,
     symbol: String,
 }
@@ -40,10 +40,15 @@ impl SnapshotStore for PostgresSnapshotStore {
         .fetch_optional(&self.connection_pool)
         .await
         .map_err(|e| PersistanceError::IoFailure)?;
+    
 
         if let Some(row) = snapshot {
-            let snapshot_json: String = row.get("snapshot_json");
-            let mut snapshot: SnapshotData = serde_json::from_str(&snapshot_json)
+            let schema_version: i32 = row.get("schema_version");
+            if schema_version != SNAPSHOT_SCHEMA_VERSION as i32 {
+                return Err(PersistanceError::FormatMismatch);
+            }
+            let snapshot_json: serde_json::Value = row.get("snapshot_json");
+            let mut snapshot: SnapshotData = serde_json::from_value(snapshot_json)
                 .map_err(|_| PersistanceError::FormatMismatch)?;
 
             snapshot.wal_high_watermark = row.get("wal_high_watermark");
@@ -55,42 +60,39 @@ impl SnapshotStore for PostgresSnapshotStore {
     }
 
     async fn save_snapshot(&mut self, snapshot_data: &SnapshotData) -> PersistResult<()> {
-        // Implementation to save snapshot to PostgreSQL
-        let wal = sqlx::query::<sqlx::Postgres>(
+        // Get the highest WAL ID for this symbol, defaulting to 0 if no WAL entries exist
+        let wal_watermark = sqlx::query::<sqlx::Postgres>(
             "select coalesce(max(id), 0) from wal where symbol = $1"
         )
         .bind(&self.symbol)
-        .fetch_optional(&self.connection_pool)
+        .fetch_one(&self.connection_pool)
         .await
         .map_err(|_| PersistanceError::IoFailure)?;
 
         let mut sp_data = snapshot_data.clone();
-        if let Some(row) = wal {
-            let wal: i64 = row.get(0);
-            sp_data.wal_high_watermark = wal;
-            let snapshot_json = serde_json::to_string(&sp_data)
-                .map_err(|_| PersistanceError::FormatMismatch)?;
+        let watermark: i64 = wal_watermark.get(0);
+        sp_data.wal_high_watermark = watermark;
+        
+        let snapshot_json = serde_json::to_string(&sp_data)
+            .map_err(|_| PersistanceError::FormatMismatch)?;
 
-            sqlx::query(
-                r#"
-                INSERT INTO snapshots (symbol, schema_version, wal_high_watermark, snapshot_json)VALUES ($1, $2, $3, $4)
-                "#,
-            )
-            .bind(&snapshot_json)
-            .bind(&self.symbol)
-            .bind(SNAPSHOT_SCHEMA_VERSION as i32)
-            .bind(sp_data.wal_high_watermark)
-            .execute(&self.connection_pool).await
-            .map_err(|_| PersistanceError::IoFailure)?;
+        sqlx::query(
+            r#"
+            INSERT INTO snapshots (symbol, schema_version, wal_high_watermark, snapshot_json) VALUES ($1, $2, $3, $4::jsonb)
+            "#,
+        )
+        .bind(&self.symbol)                       // $1
+        .bind(SNAPSHOT_SCHEMA_VERSION as i32)     // $2
+        .bind(sp_data.wal_high_watermark)         // $3
+        .bind(&snapshot_json)                      // $4
+        .execute(&self.connection_pool).await
+        .map_err(|_| PersistanceError::IoFailure)?;
 
-            PersistResult::Ok(())
-        } else {
-            Err(PersistanceError::IoFailure)
-        }
+        PersistResult::Ok(())
     }
 }
 
-struct PostgresWalStore {
+pub struct PostgresWalStore {
     pool: sqlx::PgPool,
     symbol: String,
 }
@@ -105,9 +107,7 @@ impl PostgresWalStore {
 #[async_trait::async_trait]
 impl WalStore for PostgresWalStore {
     async fn append_op(&mut self, op: &WalOp) -> PersistResult<()> {
-        // This signature should take &self — adjust your trait in mod.rs to:
-        // async fn append_op(&self, op: &WalOp) -> PersistResult<()>;
-        // (same for relay_ops/rotate)
+
         let json_string = op_to_json(op)?;
         sqlx::query(
             r#"
