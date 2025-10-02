@@ -6,6 +6,7 @@ use lobx_rs::persist::{SnapshotStore, WalStore};
 use lobx_rs::persist::snapshot;
 use lobx_rs::engine::book::Book;
 use lobx_rs::engine::types::{OrderRequest, Side};
+use lobx_rs::market_data::router;
 
 // Helper function to count total resting orders across both sides
 fn count_resting_orders(book: &Book) -> (usize, usize, usize) {
@@ -101,6 +102,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("  top                    - Show top of book");
                 println!("  snapshot              - Create and save snapshot");
                 println!("  restore               - Load and apply latest snapshot");
+                println!("  market_data           - Run Hyperliquid market data demo");
                 println!("  quit, q               - Exit");
             }
             "1" | "buy" => {
@@ -191,6 +193,15 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     println!("❌ No snapshot found to restore");
                 }
+            }
+            "market_data" => {
+                println!("Starting Hyperliquid market data demo...");
+                println!("This will connect to Hyperliquid WebSocket and display real-time ETH/USDC order book data.");
+                println!("Press Ctrl+C to stop the demo and return to the CLI.");
+                println!();
+                
+                // Run the market data demo
+                router::run_demo().await;
             }
             "quit" | "q" | "exit" => {
                 println!("Goodbye!");

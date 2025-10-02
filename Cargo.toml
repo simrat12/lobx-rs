@@ -14,7 +14,7 @@ async-trait = "0.1.78"
 
 
 # Networking
-tokio-tungstenite = "0.21"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 reqwest = { version = "0.12", features = ["json", "gzip", "stream"] }
 hyper = { version = "1.4", features = ["full"] }
 
