@@ -54,6 +54,13 @@ fn print_state_summary(book: &Book) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok(); // load .env
+    
+    // Check for unified demo flag
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--unified-demo") {
+        lobx_rs::market_data::router::run_unified_demo().await;
+        return Ok(());
+    }
 
     let db_url = env::var("DATABASE_URL")?;
     let symbol = env::var("LOBX_SYMBOL").unwrap_or_else(|_| "BTC-USD".to_string());

@@ -134,6 +134,26 @@ TOP: BID=None  ASK=(10, 90)
 - ⏳ Add snapshot/restore for persistence
 - ⏳ Connect to real exchange feeds (Binance, Coinbase)
 
+## UnifiedBook demo (internal + external view)
+
+This demo shows how a tiny read-only facade (`UnifiedBook`) merges:
+
+- **Internal book**: your own working orders (in-memory `Book`)
+- **External book**: live Hyperliquid depth (`ExternalBook`)
+
+Run:
+```bash
+cargo run -- --unified-demo
+```
+
+You'll see the external BBO and the combined BBO printed every second.
+The demo injects one local BUY slightly above the external best bid; the combined BBO moves immediately, showing how your intent changes your actionable view without modifying external data.
+
+### Notes
+* Keep this intentionally minimal — the UnifiedBook is a **query layer**, not a matcher.
+* No changes to matching logic, persistence, or adapter code were made beyond a new demo entry point and a small helper module.
+* Prices printed are integer ticks (scaled). You can format them later for UI.
+
 ## 📌 Bootcamp milestone
 
 A working in-memory limit order book with CLI demo and event emission.

@@ -58,14 +58,9 @@ impl HyperliquidAdapter {
 
     // 2) WS subscribe to l2Book for the coin and read WsBook messages
     async fn stream_l2book(&self, normaliser: &Normaliser, tx: tokio::sync::mpsc::Sender<MarketEvent>) {
-        println!("Attempting to connect to WebSocket: {}", self.ws_url);
-        
         // Connect to self.ws_url with tokio-tungstenite
         match tokio_tungstenite::connect_async(&self.ws_url).await {
-            Ok((ws_stream, response)) => {
-                println!("✅ Successfully connected to WebSocket!");
-                println!("Response status: {}", response.status());
-                println!("Response headers: {:?}", response.headers());
+            Ok((ws_stream, _response)) => {
                 let (mut write, mut read) = ws_stream.split();
                 
                 // Send subscription message
@@ -77,90 +72,52 @@ impl HyperliquidAdapter {
                     }
                 });
                 
-                println!("Sending subscription message: {}", subscribe_msg);
-                
-                if let Err(e) = write.send(tokio_tungstenite::tungstenite::Message::Text(subscribe_msg.to_string())).await {
-                    eprintln!("Failed to send subscription: {}", e);
+                if let Err(_) = write.send(tokio_tungstenite::tungstenite::Message::Text(subscribe_msg.to_string())).await {
                     return;
                 }
                 
-                println!("✅ Subscription sent successfully!");
-                
-                // Read messages from websocket
-                let mut message_count = 0;
+                // Read messages from websocket silently
                 while let Some(msg) = read.next().await {
                     match msg {
                         Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
-                            message_count += 1;
-                            println!("Received message #{}: {}", message_count, text);
-                            
                             // Try to deserialize WsMessage first
-                            match serde_json::from_str::<WsMessage>(&text) {
-                                Ok(ws_message) => {
-                                    // Only process l2Book messages
-                                    if ws_message.channel == "l2Book" {
-                                        let ws_book = ws_message.data;
-                                        
-                                        // Normalize levels using Normaliser
-                                        let bids = self.norm_side(normaliser, &ws_book.levels.0);
-                                        let asks = self.norm_side(normaliser, &ws_book.levels.1);
-                                        
-                                        // Clone values for logging before moving them
-                                        let coin = ws_book.coin.clone();
-                                        let bid_count = bids.len();
-                                        let ask_count = asks.len();
-                                        
-                                        let event = MarketEvent::Snapshot {
-                                            coin: ws_book.coin,
-                                            bids,
-                                            asks,
-                                            ts_ms: ws_book.time,
-                                        };
-                                        
-                                        // Send event to router
-                                        if let Err(e) = tx.send(event).await {
-                                            eprintln!("Failed to send market event: {}", e);
-                                            break;
-                                        }
-                                        
-                                        println!("✅ Processed book update for {}: {} bids, {} asks", 
-                                                 coin, bid_count, ask_count);
-                                    } else {
-                                        println!("📨 Received {} message (ignoring)", ws_message.channel);
+                            if let Ok(ws_message) = serde_json::from_str::<WsMessage>(&text) {
+                                // Only process l2Book messages
+                                if ws_message.channel == "l2Book" {
+                                    let ws_book = ws_message.data;
+                                    
+                                    // Normalize levels using Normaliser
+                                    let bids = self.norm_side(normaliser, &ws_book.levels.0);
+                                    let asks = self.norm_side(normaliser, &ws_book.levels.1);
+                                    
+                                    let event = MarketEvent::Snapshot {
+                                        coin: ws_book.coin,
+                                        bids,
+                                        asks,
+                                        ts_ms: ws_book.time,
+                                    };
+                                    
+                                    // Send event to router
+                                    if let Err(_) = tx.send(event).await {
+                                        break;
                                     }
-                                }
-                                Err(e) => {
-                                    println!("⚠️  Failed to parse as WsMessage: {}", e);
-                                    println!("Raw message: {}", text);
                                 }
                             }
                         }
                         Ok(tokio_tungstenite::tungstenite::Message::Close(_)) => {
-                            println!("WebSocket connection closed by server");
                             break;
                         }
-                        Ok(other) => {
-                            println!("Received non-text message: {:?}", other);
+                        Ok(_) => {
+                            // Ignore other message types
                         }
-                        Err(e) => {
-                            eprintln!("Error reading from WebSocket: {}", e);
+                        Err(_) => {
                             break;
                         }
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("❌ Failed to connect to websocket: {}", self.ws_url);
-                eprintln!("Error details: {}", e);
-                
-                // Try to provide more helpful error information
-                if e.to_string().contains("Connection refused") {
-                    eprintln!("💡 This might be a network connectivity issue or the server is down");
-                } else if e.to_string().contains("timeout") {
-                    eprintln!("💡 Connection timed out - the server might be slow to respond");
-                } else if e.to_string().contains("TLS") {
-                    eprintln!("💡 TLS/SSL connection issue - check if the certificate is valid");
-                }
+            Err(_) => {
+                // Connection failed silently
             }
         }
     }
@@ -186,14 +143,12 @@ impl VenueAdapter for HyperliquidAdapter {
         // Step A: fetch spot meta (REST) to learn decimals for this pair
         let meta = match self.fetch_spot_meta().await {
             Ok(meta) => meta,
-            Err(e) => {
-                eprintln!("Failed to fetch spot meta: {}", e);
+            Err(_) => {
                 return;
             }
         };
         
         let sz_dec = self.sz_decimals_for_pair(&meta);
-        println!("Using size decimals: {} for pair: {}", sz_dec, self.pair);
 
         // Step B: construct a Normaliser with the decimals you need
         // Use 6 decimal places for price (typical for crypto prices)

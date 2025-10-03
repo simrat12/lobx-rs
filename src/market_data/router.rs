@@ -1,79 +1,187 @@
-// Router orchestrates adapter + book
-use crate::market_data::adapters::{MarketEvent, VenueAdapter};
 use crate::market_data::adapters::hyperliquid::HyperliquidAdapter;
+use crate::market_data::adapters::{MarketEvent, VenueAdapter};
 use crate::market_data::external_book::ExternalBook;
-use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::time::Duration;
+use std::sync::{Arc, Mutex};
+use tokio::time::{interval, Duration};
 
 pub async fn run_demo() {
-    println!("Starting Hyperliquid market data demo...");
+    println!("🚀 Market Data Demo: Live ETH/USDC from Hyperliquid");
+    println!("{}", "=".repeat(60));
     
-    // 1. Create adapter (HyperliquidAdapter) for ETH/USDC
+    // Create adapter and external book
     let adapter = HyperliquidAdapter::new("ETH", "ETH/USDC");
-    
-    // 2. Create external book to store normalized data
-    let book = Arc::new(Mutex::new(ExternalBook::new()));
-    
-    // 3. Create channel for market events
-    let (tx, mut rx) = mpsc::channel::<MarketEvent>(1000);
-    
-    // 4. Clone the book for the adapter task
-    let book_clone = Arc::clone(&book);
-    let adapter_task = tokio::spawn(async move {
+    let external = Arc::new(Mutex::new(ExternalBook::new()));
+    let (tx, mut rx) = mpsc::channel::<MarketEvent>(1024);
+    let ext_clone = external.clone();
+
+    // Spawn adapter to stream live data
+    tokio::spawn(async move {
         adapter.spawn(tx).await;
     });
-    
-    // 5. Spawn book update task
-    let book_update_task = tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match event {
-                MarketEvent::Snapshot { coin, bids, asks, ts_ms } => {
-                    let mut book_guard = book_clone.lock().unwrap();
-                    book_guard.apply_snapshot(&bids, &asks);
-                    println!("[{}] Updated book for {} with {} bids and {} asks", 
-                             ts_ms, coin, bids.len(), asks.len());
-                }
-            }
+
+    // Process market events and update external book
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let MarketEvent::Snapshot { bids, asks, .. } = ev;
+            ext_clone.lock().unwrap().apply_snapshot(&bids, &asks);
         }
     });
-    
-    // 6. Print BBO every second
-    let bbo_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-            let book_guard = book.lock().unwrap();
-            let (best_bid, best_ask) = book_guard.bbo();
+
+    // Display BBO updates
+    let mut ticker = interval(Duration::from_secs(1));
+    for _ in 0..10 {
+        ticker.tick().await;
+        
+        let (bid, ask) = external.lock().unwrap().bbo();
+        if let (Some((bid_px, bid_sz)), Some((ask_px, ask_sz))) = (bid, ask) {
+            let bid_price = bid_px as f64 / 1_000_000.0;
+            let ask_price = ask_px as f64 / 1_000_000.0;
+            let spread = ask_price - bid_price;
+            let mid = (bid_price + ask_price) / 2.0;
             
-            match (best_bid, best_ask) {
-                (Some((bid_price, bid_size)), Some((ask_price, ask_size))) => {
-                    // Convert back to human-readable prices (divide by scale)
-                    let bid_price_f64 = bid_price as f64 / 1_000_000.0;
-                    let ask_price_f64 = ask_price as f64 / 1_000_000.0;
-                    println!("BBO: BID {:.6} @ {:.6} | ASK {:.6} @ {:.6} | Spread: {:.6}", 
-                             bid_price_f64, bid_size, ask_price_f64, ask_size, 
-                             ask_price_f64 - bid_price_f64);
-                }
-                (Some((bid_price, bid_size)), None) => {
-                    let bid_price_f64 = bid_price as f64 / 1_000_000.0;
-                    println!("BBO: BID {:.6} @ {} | ASK: None", bid_price_f64, bid_size);
-                }
-                (None, Some((ask_price, ask_size))) => {
-                    let ask_price_f64 = ask_price as f64 / 1_000_000.0;
-                    println!("BBO: BID: None | ASK {:.6} @ {}", ask_price_f64, ask_size);
-                }
-                (None, None) => {
-                    println!("BBO: No data available");
-                }
-            }
+            println!("📊 ETH/USDC: ${:.2} / ${:.2} (mid: ${:.2}, spread: ${:.3})", 
+                     bid_price, ask_price, mid, spread);
+        } else {
+            println!("⏳ Waiting for market data...");
+        }
+    }
+    
+    println!("\n✅ Demo complete! Live market data streaming from Hyperliquid.");
+}
+
+pub async fn run_unified_demo() {
+    println!("🚀 Advanced Trading System Demo: Market Making with Unified Book");
+    println!("{}", "=".repeat(65));
+    println!("This demonstrates a REAL market-making system that:");
+    println!("  • Connects to live Hyperliquid market data");
+    println!("  • Maintains an in-memory order book with multiple quote levels");
+    println!("  • Simulates fills when external market crosses our quotes");
+    println!("  • Adjusts quotes based on inventory risk");
+    println!("  • Shows unified view combining external + internal liquidity\n");
+
+    // Set up the system (quietly)
+    let adapter = HyperliquidAdapter::new("ETH", "ETH/USDC");
+    let external = Arc::new(Mutex::new(ExternalBook::new()));
+    let internal = Arc::new(Mutex::new(crate::engine::book::Book::new()));
+    let (tx, mut rx) = mpsc::channel::<MarketEvent>(1024);
+    let ext_clone = external.clone();
+
+    // Start getting live data (silently)
+    tokio::spawn(async move { adapter.spawn(tx).await; });
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let MarketEvent::Snapshot { bids, asks, .. } = ev;
+            ext_clone.lock().unwrap().apply_snapshot(&bids, &asks);
         }
     });
+
+    let unified = crate::market_data::unified_book::UnifiedBook::new(internal.clone(), external.clone(), 1_000_000);
+    let mut market_maker = crate::market_data::market_maker::MarketMaker::new(internal.clone());
     
-    // Wait for all tasks to complete (they run indefinitely)
-    tokio::select! {
-        _ = adapter_task => println!("Adapter task completed"),
-        _ = book_update_task => println!("Book update task completed"),
-        _ = bbo_task => println!("BBO display task completed"),
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    println!("📡 Connecting to live market data...");
+    let (ext_bid, ext_ask) = external.lock().unwrap().bbo();
+    if ext_bid.is_some() && ext_ask.is_some() {
+        println!("✅ Connected! Starting market-making strategy...\n");
+    } else {
+        println!("⏳ Still connecting...\n");
+    }
+
+    let mut ticker = interval(Duration::from_secs(2));
+    let mut demo_step = 0;
+    let mut quotes_posted = false;
+
+    loop {
+        println!("🔍 Demo step {}: External data available: {}", demo_step, ext_bid.is_some() && ext_ask.is_some());
+        ticker.tick().await;
+        demo_step += 1;
+
+        let (ext_bid, ext_ask) = {
+            let external_book = external.lock().unwrap();
+            external_book.bbo()
+        };
+        let (cmb_bid, cmb_ask) = unified.combined_bbo();
+
+        if let (Some((bid_px, _bid_sz)), Some((ask_px, _ask_sz))) = (ext_bid, ext_ask) {
+            let market_price = (bid_px + ask_px) as f64 / 2_000_000.0;
+            let spread = (ask_px - bid_px) as f64 / 1_000_000.0;
+            
+            println!("📊 External Market: ${:.2} (spread: ${:.2})", market_price, spread);
+            
+            // Post initial quotes
+            if !quotes_posted {
+                quotes_posted = true;
+                println!("\n🎯 MARKET MAKER: Posting 3-level quote ladder...");
+                let actions = market_maker.update_quotes(ext_bid, ext_ask, 20); // 20 bps spread
+                for action in actions {
+                    println!("   {}", action);
+                }
+                println!("   📈 Strategy: Provide liquidity with 20bps spread, 3 levels deep");
+            } else {
+                // Update quotes every few iterations to show dynamic behavior
+                if demo_step % 3 == 0 {
+                    println!("\n🔄 MARKET MAKER: Updating quotes based on market conditions...");
+                    let actions = market_maker.update_quotes(ext_bid, ext_ask, 20);
+                    for action in actions.iter().take(3) { // Show first 3 actions
+                        println!("   {}", action);
+                    }
+                }
+                
+                // Check for simulated fills
+                let fills = market_maker.check_crosses(ext_bid, ext_ask);
+                for fill in fills {
+                    println!("   {}", fill);
+                }
+            }
+
+            // Show unified view
+            if let (Some((cmb_bid_px, cmb_bid_sz)), Some((cmb_ask_px, cmb_ask_sz))) = (cmb_bid, cmb_ask) {
+                println!("\n💡 UNIFIED BOOK VIEW:");
+                println!("   Best BUY:  ${:.2} @ {:.2} ETH (external + our quotes)", 
+                    cmb_bid_px as f64 / 1_000_000.0, cmb_bid_sz as f64 / 1_000_000.0);
+                println!("   Best SELL: ${:.2} @ {:.2} ETH (external + our quotes)", 
+                    cmb_ask_px as f64 / 1_000_000.0, cmb_ask_sz as f64 / 1_000_000.0);
+                
+                // Show if our quotes are on top
+                if cmb_bid_px > bid_px || cmb_ask_px < ask_px {
+                    println!("   ✨ Our quotes are providing the best prices!");
+                }
+                
+                // Show market maker status
+                println!("   📊 {}", market_maker.get_status());
+            }
+
+            // Show depth view occasionally
+            if demo_step % 4 == 0 {
+                let (top_bids, top_asks) = unified.combined_depth_top_n(3);
+                println!("\n📋 TOP 3 LEVELS (Combined External + Internal):");
+                println!("   ASKS (Sell):");
+                for (px, sz) in top_asks.iter().rev() {
+                    println!("     ${:.2} @ {:.2} ETH", *px as f64 / 1_000_000.0, *sz as f64 / 1_000_000.0);
+                }
+                println!("   BIDS (Buy):");
+                for (px, sz) in top_bids {
+                    println!("     ${:.2} @ {:.2} ETH", px as f64 / 1_000_000.0, sz as f64 / 1_000_000.0);
+                }
+            }
+
+        } else {
+            println!("⏳ Waiting for market data...");
+        }
+
+        println!();
+
+        if demo_step >= 12 {
+            println!("🎉 DEMO COMPLETE!");
+            println!("Key takeaways:");
+            println!("  • In-memory book enables instant quote management (cancel/replace by ID)");
+            println!("  • Unified view combines external + internal liquidity seamlessly");
+            println!("  • Fill simulation shows realistic market-making behavior");
+            println!("  • Inventory-aware quoting adjusts risk based on position");
+            println!("  • Multiple quote levels provide depth and flexibility\n");
+            break;
+        }
     }
 }
