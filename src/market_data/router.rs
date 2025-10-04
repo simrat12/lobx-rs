@@ -102,7 +102,7 @@ pub async fn run_unified_demo() {
             let external_book = external.lock().unwrap();
             external_book.bbo()
         };
-        let (cmb_bid, cmb_ask) = unified.combined_bbo();
+        let (cmb_bid, cmb_ask) = unified.combined_bbo_with_source();
 
         if let (Some((bid_px, _bid_sz)), Some((ask_px, _ask_sz))) = (ext_bid, ext_ask) {
             let market_price = (bid_px + ask_px) as f64 / 2_000_000.0;
@@ -136,16 +136,32 @@ pub async fn run_unified_demo() {
                 }
             }
 
-            // Show unified view
-            if let (Some((cmb_bid_px, cmb_bid_sz)), Some((cmb_ask_px, cmb_ask_sz))) = (cmb_bid, cmb_ask) {
+            // Show unified view with source information
+            if let (Some(cmb_bid), Some(cmb_ask)) = (cmb_bid, cmb_ask) {
                 println!("\n💡 UNIFIED BOOK VIEW:");
-                println!("   Best BUY:  ${:.2} @ {:.2} ETH (external + our quotes)", 
-                    cmb_bid_px as f64 / 1_000_000.0, cmb_bid_sz as f64 / 1_000_000.0);
-                println!("   Best SELL: ${:.2} @ {:.2} ETH (external + our quotes)", 
-                    cmb_ask_px as f64 / 1_000_000.0, cmb_ask_sz as f64 / 1_000_000.0);
+                
+                let bid_source = match cmb_bid.source {
+                    crate::market_data::unified_book::PriceSource::External => "🌐 EXTERNAL (Hyperliquid)",
+                    crate::market_data::unified_book::PriceSource::Internal => "🏠 INTERNAL (Our quotes)",
+                };
+                
+                let ask_source = match cmb_ask.source {
+                    crate::market_data::unified_book::PriceSource::External => "🌐 EXTERNAL (Hyperliquid)",
+                    crate::market_data::unified_book::PriceSource::Internal => "🏠 INTERNAL (Our quotes)",
+                };
+                
+                println!("   Best BUY:  ${:.2} @ {:.2} ETH {}", 
+                    cmb_bid.price as f64 / 1_000_000.0, 
+                    cmb_bid.size as f64 / 1_000_000.0,
+                    bid_source);
+                println!("   Best SELL: ${:.2} @ {:.2} ETH {}", 
+                    cmb_ask.price as f64 / 1_000_000.0, 
+                    cmb_ask.size as f64 / 1_000_000.0,
+                    ask_source);
                 
                 // Show if our quotes are on top
-                if cmb_bid_px > bid_px || cmb_ask_px < ask_px {
+                if matches!(cmb_bid.source, crate::market_data::unified_book::PriceSource::Internal) || 
+                   matches!(cmb_ask.source, crate::market_data::unified_book::PriceSource::Internal) {
                     println!("   ✨ Our quotes are providing the best prices!");
                 }
                 

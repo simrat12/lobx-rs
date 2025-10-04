@@ -7,6 +7,7 @@ use lobx_rs::persist::snapshot;
 use lobx_rs::engine::book::Book;
 use lobx_rs::engine::types::{OrderRequest, Side};
 use lobx_rs::market_data::router;
+use lobx_rs::telemetry;
 
 // Helper function to count total resting orders across both sides
 fn count_resting_orders(book: &Book) -> (usize, usize, usize) {
@@ -54,6 +55,10 @@ fn print_state_summary(book: &Book) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok(); // load .env
+    
+    // Initialize telemetry and metrics
+    telemetry::init_tracing("lobx_rs=info");
+    telemetry::init_metrics();
     
     // Check for unified demo flag
     let args: Vec<String> = std::env::args().collect();

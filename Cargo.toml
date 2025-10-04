@@ -70,5 +70,19 @@ quickcheck = "1.0"
 [features]
 metrics-exporter = ["dep:metrics-exporter-prometheus"]
 
+[profile.release]
+# Maximum performance optimizations
+opt-level = 3
+lto = true                    # Link-time optimization
+codegen-units = 1            # Single codegen unit for better optimization
+panic = "abort"              # Smaller binaries
+strip = true                 # Remove debug symbols
+overflow-checks = false      # Disable runtime overflow checks for speed
+
+[profile.release-lto]
+inherits = "release"
+lto = "fat"                  # Aggressive LTO
+codegen-units = 1
+
 [build-dependencies]
 prost-build = "0.13"

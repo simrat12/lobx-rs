@@ -13,6 +13,19 @@ pub struct UnifiedBook {
     pub price_scale: i64, // e.g. 1_000_000 for 6 dp
 }
 
+#[derive(Debug, Clone)]
+pub enum PriceSource {
+    External,
+    Internal,
+}
+
+#[derive(Debug, Clone)]
+pub struct BBOWithSource {
+    pub price: i64,
+    pub size: u64,
+    pub source: PriceSource,
+}
+
 impl UnifiedBook {
     pub fn new(internal: Arc<Mutex<Book>>, external: Arc<Mutex<ExternalBook>>, price_scale: i64) -> Self {
         Self { internal, external, price_scale }
@@ -37,6 +50,45 @@ impl UnifiedBook {
             (None, x) | (x, None) => x,
             (Some(e), Some(i)) => Some(if i.0 < e.0 { i } else { e }),
         };
+        (best_bid, best_ask)
+    }
+
+    /// Enhanced BBO that shows which source each price came from
+    pub fn combined_bbo_with_source(&self) -> (Option<BBOWithSource>, Option<BBOWithSource>) {
+        let (ext_bid, ext_ask) = self.external.lock().unwrap().bbo();
+        let (int_bid, int_ask) = {
+            let b = self.internal.lock().unwrap();
+            (b.best_bid().map(|(p, q)| (p as i64, q)), b.best_ask().map(|(p, q)| (p as i64, q)))
+        };
+
+        // choose higher bid
+        let best_bid = match (ext_bid, int_bid) {
+            (None, None) => None,
+            (Some(e), None) => Some(BBOWithSource { price: e.0, size: e.1, source: PriceSource::External }),
+            (None, Some(i)) => Some(BBOWithSource { price: i.0, size: i.1, source: PriceSource::Internal }),
+            (Some(e), Some(i)) => {
+                if i.0 > e.0 {
+                    Some(BBOWithSource { price: i.0, size: i.1, source: PriceSource::Internal })
+                } else {
+                    Some(BBOWithSource { price: e.0, size: e.1, source: PriceSource::External })
+                }
+            }
+        };
+
+        // choose lower ask
+        let best_ask = match (ext_ask, int_ask) {
+            (None, None) => None,
+            (Some(e), None) => Some(BBOWithSource { price: e.0, size: e.1, source: PriceSource::External }),
+            (None, Some(i)) => Some(BBOWithSource { price: i.0, size: i.1, source: PriceSource::Internal }),
+            (Some(e), Some(i)) => {
+                if i.0 < e.0 {
+                    Some(BBOWithSource { price: i.0, size: i.1, source: PriceSource::Internal })
+                } else {
+                    Some(BBOWithSource { price: e.0, size: e.1, source: PriceSource::External })
+                }
+            }
+        };
+
         (best_bid, best_ask)
     }
 

@@ -1,5 +1,3 @@
-// Hyperliquid adapter skeleton with CONCRETE endpoints & TODOs
-
 use super::{MarketEvent, VenueAdapter};
 use crate::market_data::normaliser::Normaliser;
 use super::hyperliquid_types::{SpotMeta, WsBook, WsLevel, WsMessage};
